@@ -1,0 +1,23 @@
+# CircuitPython settings.toml -- shared configuration
+# ==============================================================
+# Copy this file to `settings.toml` on your CIRCUITPY drive and
+# fill in your WiFi credentials.
+#
+# Any .py file on this drive can read these values with
+# os.getenv("KEY_NAME"). This is the recommended place for
+# credentials so they don't have to be duplicated in every sample.
+#
+# NOTE: The keys are deliberately NOT named CIRCUITPY_WIFI_SSID /
+# CIRCUITPY_WIFI_PASSWORD. Those magic names trigger CircuitPython's
+# web workflow, which brings up WiFi at boot before code.py runs and
+# adds ~10 s of association/DHCP wait to every cold start -- even
+# when running a sample that doesn't use WiFi. Using non-magic names
+# keeps that cost opt-in: only samples that call wifi.radio.connect()
+# themselves pay it.
+#
+# Values must be strings, integers, or booleans (no arrays/tables).
+# ==============================================================
+
+# --- WiFi credentials (used by any program that connects to WiFi) ---
+WIFI_SSID     = "your-network"
+WIFI_PASSWORD = "your-password"

@@ -1,0 +1,32 @@
+# Claude Code workspace state.
+.claude/
+
+# Local WiFi credentials — copy settings.toml.example and edit locally.
+settings.toml
+
+# CircuitPython auto-generated boot log (contains the specific board's UID + MAC).
+boot_out.txt
+
+# CircuitPython bytecode caches (rare on CIRCUITPY, but just in case).
+__pycache__/
+*.py[cod]
+
+# Editor / OS scratch files that end up on the CIRCUITPY drive.
+*.tmp
+*.swp
+*.swo
+*~
+
+# macOS metadata
+.DS_Store
+.fseventsd/
+.Spotlight-V100
+.Trashes
+.metadata_never_index
+._*
+
+# Windows metadata
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+System Volume Information/
