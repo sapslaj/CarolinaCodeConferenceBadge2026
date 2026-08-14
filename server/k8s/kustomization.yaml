@@ -4,12 +4,13 @@ kind: Kustomization
 namespace: badge-hub
 
 resources:
-  - namespace.yaml
-  - deployment.yaml
-  - service.yaml
-  - ingress.yaml
-  - ingress-dns.yaml
+- namespace.yaml
+- deployment.yaml
+- service.yaml
+- ingress.yaml
+- ingress-dns.yaml
 
 images:
-  - name: oci.sapslaj.xyz/badge-hub
-    newName: oci.sapslaj.xyz/badge-hub
+- name: oci.sapslaj.xyz/badge-hub
+  newName: oci.sapslaj.xyz/badge-hub
+  newTag: 9cb4840
