@@ -10,4 +10,7 @@ RUN CGO_ENABLED=0 go build -o /badge-server .
 FROM gcr.io/distroless/static-debian12
 COPY --from=build /badge-server /badge-server
 COPY samples/ /samples
+COPY lib/ /lib
+COPY mods/ /mods
+COPY tools/ /tools
 ENTRYPOINT ["/badge-server"]

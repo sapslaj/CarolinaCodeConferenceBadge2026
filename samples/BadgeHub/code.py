@@ -28,13 +28,15 @@ Controls
 The badge checks in with the server on boot, then polls /api/state every
 5 seconds for updates (broadcasts, light commands, poll changes, room mood).
 
-OTA sample updates
--------------------
-Every 60 seconds BadgeHub also asks the server for a manifest of every
-sample under /samples/ on the server (see server/main.go). If a sample's
-content hash differs from what is already on the badge, BadgeHub downloads
-the changed files straight onto the CIRCUITPY drive and reboots to pick
-them up.
+OTA updates
+-----------
+Every 60 seconds BadgeHub also asks the server for a manifest covering
+/samples/, /lib/, /mods/, and /tools/ (see server/main.go). Each top-level
+entry in those directories -- a sample folder, a lib package, a mod, a
+tool script -- is hashed on its own, so only what actually changed gets
+pulled. Anything whose hash
+differs from what's already on the badge is downloaded straight onto the
+CIRCUITPY drive, and BadgeHub reboots to pick it up.
 
 Like GifPlayer's GIPHY mode, this needs write access to the badge's own
 filesystem, which CircuitPython only grants when the host computer isn't
@@ -75,7 +77,12 @@ SERVER_URL = "https://badge.sapslaj.cloud"
 
 MY_NAME = os.getenv("FIRST_NAME", "YOUR") + " " + os.getenv("LAST_NAME", "NAME")
 
-OTA_DIR = "/samples"
+OTA_KINDS = {
+    "samples": "/samples",
+    "lib": "/lib",
+    "mods": "/mods",
+    "tools": "/tools",
+}
 OTA_STATE_PATH = "/samples/.ota_state.json"
 OTA_CHECK_INTERVAL = 60.0
 # ==============================================================
@@ -161,7 +168,7 @@ def api_post(path, body):
 
 
 # ------------------------------------------------------------------
-# OTA sample updates
+# OTA updates (samples, lib, mods)
 # ------------------------------------------------------------------
 def make_writable():
     """Try to get write access to the badge's own filesystem.
@@ -220,12 +227,12 @@ def save_ota_state(state):
         print("BadgeHub: could not save OTA state:", exc)
 
 
-def ota_download_file(sample, rel_path, dest_path):
-    url = SERVER_URL + "/api/ota/file?sample=" + sample + "&path=" + rel_path
+def ota_download_file(kind, rel_path, dest_path):
+    url = SERVER_URL + "/api/ota/file?kind=" + kind + "&path=" + rel_path
     r = http().get(url)
     try:
         if r.status_code != 200:
-            print("BadgeHub: OTA fetch failed:", sample, rel_path, r.status_code)
+            print("BadgeHub: OTA fetch failed:", kind, rel_path, r.status_code)
             return False
         ensure_dirs_for(dest_path)
         with open(dest_path, "wb") as f:
@@ -233,39 +240,45 @@ def ota_download_file(sample, rel_path, dest_path):
                 f.write(chunk)
         return True
     except Exception as exc:
-        print("BadgeHub: OTA write failed:", sample, rel_path, exc)
+        print("BadgeHub: OTA write failed:", kind, rel_path, exc)
         return False
     finally:
         r.close()
 
 
-def apply_sample_update(name, info):
-    """Download every file listed for sample `name`. Only succeeds (and
-    is only recorded as applied) if every file lands cleanly -- a
-    half-written sample is worse than a stale one."""
-    ensure_dir(OTA_DIR + "/" + name)
+def apply_unit_update(kind, info):
+    """Download every file listed for one unit (a sample folder, a lib
+    package, a mod). Every file's path already comes back from the server
+    relative to the kind's root, so ensure_dirs_for handles nesting on its
+    own. Only succeeds (and is only recorded as applied) if every file
+    lands cleanly -- a half-written unit is worse than a stale one."""
+    kind_dir = OTA_KINDS[kind]
     for f in info["files"]:
-        dest = OTA_DIR + "/" + name + "/" + f["path"]
-        if not ota_download_file(name, f["path"], dest):
+        dest = kind_dir + "/" + f["path"]
+        if not ota_download_file(kind, f["path"], dest):
             return False
     return True
 
 
 def check_ota_updates():
-    """Compare the server's sample manifest against what's on the badge
-    and pull down anything that changed. Returns True if at least one
-    sample was updated."""
+    """Compare the server's manifest -- samples, lib, and mods -- against
+    what's on the badge and pull down anything that changed. Returns True
+    if at least one unit was updated."""
     try:
         manifest = api_get("/api/ota/manifest")
     except Exception as exc:
         print("BadgeHub: OTA manifest fetch failed:", exc)
         return False
 
+    kinds = manifest.get("kinds", {})
     state = load_ota_state()
     pending = []
-    for name, info in manifest.get("samples", {}).items():
-        if state.get(name) != info.get("hash"):
-            pending.append((name, info))
+    for kind in OTA_KINDS:
+        kind_state = state.setdefault(kind, {})
+        units = kinds.get(kind, {}).get("units", {})
+        for name, info in units.items():
+            if kind_state.get(name) != info.get("hash"):
+                pending.append((kind, name, info))
 
     if not pending:
         return False
@@ -275,13 +288,13 @@ def check_ota_updates():
 
     updated = False
     try:
-        for name, info in pending:
-            print("BadgeHub: OTA updating sample:", name)
-            if apply_sample_update(name, info):
-                state[name] = info["hash"]
+        for kind, name, info in pending:
+            print("BadgeHub: OTA updating", kind, name)
+            if apply_unit_update(kind, info):
+                state[kind][name] = info["hash"]
                 updated = True
             else:
-                print("BadgeHub: OTA update incomplete, will retry:", name)
+                print("BadgeHub: OTA update incomplete, will retry:", kind, name)
         if updated:
             save_ota_state(state)
     finally:
@@ -549,8 +562,8 @@ if wifi.radio.ipv4_address:
     except Exception as e:
         print("State fetch error:", e)
 
-# Check for OTA sample updates right away, so a badge that boots with a
-# stale sample on disk gets fixed before anyone picks it from the menu.
+# Check for OTA updates right away, so a badge that boots with something
+# stale on disk gets fixed before anyone picks it from the menu.
 if wifi.radio.ipv4_address:
     status_lbl.text = "checking updates..."
     display.refresh()
@@ -635,7 +648,7 @@ while True:
             print("State fetch error:", e)
         last_state_fetch = now
 
-    # Check for OTA sample updates periodically
+    # Check for OTA updates periodically
     if wifi.radio.ipv4_address and (now - last_ota_check) > OTA_CHECK_INTERVAL:
         last_ota_check = now
         try:

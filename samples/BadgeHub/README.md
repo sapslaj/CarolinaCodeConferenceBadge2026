@@ -24,17 +24,23 @@ default. See `server/` in this repo for the badge-hub server itself.
 | SW2 (IO2)  | Vote in the active poll (cycles options, press to vote) |
 | SW3 (IO43) | Toggle between hub view and clock view |
 
-## OTA sample updates
+## OTA updates
 
-BadgeHub doubles as the OTA client for every sample in this repo. Every
-60 seconds it asks the server for `/api/ota/manifest` -- a hash of every
-sample folder under `server`'s bundled `samples/` directory -- and
-compares it against `/samples/.ota_state.json` on the badge. If a
-sample's hash changed, BadgeHub downloads the changed files straight
-onto the CIRCUITPY drive via `/api/ota/file`, then reboots
-(`supervisor.reload()`) to pick them up.
+BadgeHub doubles as the OTA client for this repo's `samples/`, `lib/`,
+and `mods/` directories. Every 60 seconds (and once right after boot) it
+asks the server for `/api/ota/manifest` -- a hash of every top-level
+entry in each of those three directories, as bundled into the server's
+image -- and compares it against `/samples/.ota_state.json` on the
+badge. Anything whose hash changed gets downloaded straight onto the
+CIRCUITPY drive via `/api/ota/file`, then BadgeHub reboots
+(`supervisor.reload()`) to pick it up.
 
-Shipping an update is just redeploying the server with new sample code
+- `samples/<Name>/...` -- every sample folder.
+- `lib/<package>/...` or `lib/<file>.mpy` -- library packages and
+  standalone files.
+- `mods/<file>` -- the badge-mod runtime's modules (see `mods/README.md`).
+
+Shipping an update is just redeploying the server with new code
 committed to this repo -- there's no separate publish step.
 
 This needs write access to the badge's own filesystem, the same

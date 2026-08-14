@@ -153,6 +153,13 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 // ---- Badge handlers ----
 
 func handleState(s *ServerState) http.HandlerFunc {
@@ -353,10 +360,14 @@ func handleAdminBadges(s *ServerState) http.HandlerFunc {
 
 // ---- OTA ----
 //
-// Badges pull sample updates straight from the server: each sample folder
-// under SAMPLES_DIR gets hashed into a manifest, and BadgeHub compares that
-// against what it last applied. Redeploying the server with new sample code
-// is what ships an update -- there is no separate publish step.
+// Badges pull updates straight from the server across four kinds of
+// content -- samples/, lib/, mods/, and tools/ -- each rooted at its own
+// directory.
+// Within a kind, every top-level entry (a sample folder, a lib package
+// folder, a lone .mpy) becomes a "unit" hashed into the manifest, and
+// BadgeHub compares that against what it last applied. Redeploying the
+// server with new content is what ships an update -- there is no separate
+// publish step.
 
 type OTAFile struct {
 	Path   string `json:"path"`
@@ -364,21 +375,31 @@ type OTAFile struct {
 	Size   int64  `json:"size"`
 }
 
-type OTASample struct {
+// OTAUnit is one top-level entry within a kind -- a sample folder, a lib
+// package folder, or a single top-level file (e.g. lib/neopixel.mpy). Its
+// Files' Paths are relative to the *kind's* root, not the unit, so a file
+// can be fetched with nothing beyond (kind, path).
+type OTAUnit struct {
 	Hash  string    `json:"hash"`
 	Files []OTAFile `json:"files"`
 }
 
+type OTAKind struct {
+	Units map[string]OTAUnit `json:"units"`
+}
+
 type OTAManifest struct {
-	Samples map[string]OTASample `json:"samples"`
+	Kinds map[string]OTAKind `json:"kinds"`
 }
 
 type OTAStore struct {
-	dir      string
+	roots    map[string]string // kind -> root dir
 	manifest OTAManifest
 }
 
-func collectSampleFiles(root string) ([]OTAFile, error) {
+// collectDirFiles walks root and returns every file under it, Path relative
+// to root.
+func collectDirFiles(root string) ([]OTAFile, error) {
 	var files []OTAFile
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -407,47 +428,88 @@ func collectSampleFiles(root string) ([]OTAFile, error) {
 	return files, err
 }
 
-// loadOTAStore hashes every sample folder under dir once at startup. A
-// missing or empty directory is not fatal -- OTA is simply unavailable and
-// the rest of the badge server keeps working.
-func loadOTAStore(dir string) *OTAStore {
-	manifest := OTAManifest{Samples: make(map[string]OTASample)}
+func hashUnit(files []OTAFile) string {
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	h := sha256.New()
+	for _, f := range files {
+		io.WriteString(h, f.Path)
+		io.WriteString(h, f.SHA256)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
-	entries, err := os.ReadDir(dir)
+// collectKindUnits treats every top-level entry of root as its own unit. A
+// directory entry is walked recursively with its files prefixed by the
+// entry's name (e.g. "adafruit_bitmap_font/bdf.mpy"); a top-level file is a
+// one-file unit whose single file's Path is just its own name (e.g.
+// "neopixel.mpy"). Either way every OTAFile.Path returned is relative to
+// root, so it can be fetched directly.
+func collectKindUnits(root string) (map[string]OTAUnit, error) {
+	entries, err := os.ReadDir(root)
 	if err != nil {
-		logger.Warn("OTA samples directory unavailable, OTA disabled", "dir", dir, "error", err)
-		return &OTAStore{dir: dir, manifest: manifest}
+		return nil, err
 	}
 
+	units := make(map[string]OTAUnit)
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
 		name := e.Name()
-		files, err := collectSampleFiles(filepath.Join(dir, name))
-		if err != nil {
-			logger.Warn("failed to hash sample, skipping", "sample", name, "error", err)
+		if strings.HasPrefix(name, ".") {
 			continue
 		}
+
+		var files []OTAFile
+		if e.IsDir() {
+			sub, err := collectDirFiles(filepath.Join(root, name))
+			if err != nil {
+				logger.Warn("failed to hash OTA unit, skipping", "unit", name, "error", err)
+				continue
+			}
+			for _, f := range sub {
+				files = append(files, OTAFile{
+					Path:   name + "/" + f.Path,
+					SHA256: f.SHA256,
+					Size:   f.Size,
+				})
+			}
+		} else {
+			data, err := os.ReadFile(filepath.Join(root, name))
+			if err != nil {
+				logger.Warn("failed to hash OTA unit, skipping", "unit", name, "error", err)
+				continue
+			}
+			sum := sha256.Sum256(data)
+			files = []OTAFile{{
+				Path:   name,
+				SHA256: hex.EncodeToString(sum[:]),
+				Size:   int64(len(data)),
+			}}
+		}
+
 		if len(files) == 0 {
 			continue
 		}
-		sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+		units[name] = OTAUnit{Hash: hashUnit(files), Files: files}
+	}
+	return units, nil
+}
 
-		h := sha256.New()
-		for _, f := range files {
-			io.WriteString(h, f.Path)
-			io.WriteString(h, f.SHA256)
-		}
+// loadOTAStore hashes every kind's directory once at startup. A missing or
+// empty kind directory is not fatal -- that kind is simply left out of the
+// manifest and the rest of the badge server keeps working.
+func loadOTAStore(roots map[string]string) *OTAStore {
+	manifest := OTAManifest{Kinds: make(map[string]OTAKind)}
 
-		manifest.Samples[name] = OTASample{
-			Hash:  hex.EncodeToString(h.Sum(nil)),
-			Files: files,
+	for kind, dir := range roots {
+		units, err := collectKindUnits(dir)
+		if err != nil {
+			logger.Warn("OTA kind directory unavailable, skipping", "kind", kind, "dir", dir, "error", err)
+			continue
 		}
+		manifest.Kinds[kind] = OTAKind{Units: units}
+		logger.Info("OTA manifest built", "kind", kind, "dir", dir, "units", len(units))
 	}
 
-	logger.Info("OTA manifest built", "dir", dir, "samples", len(manifest.Samples))
-	return &OTAStore{dir: dir, manifest: manifest}
+	return &OTAStore{roots: roots, manifest: manifest}
 }
 
 func handleOTAManifest(store *OTAStore) http.HandlerFunc {
@@ -458,12 +520,17 @@ func handleOTAManifest(store *OTAStore) http.HandlerFunc {
 
 func handleOTAFile(store *OTAStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sample := r.URL.Query().Get("sample")
+		kind := r.URL.Query().Get("kind")
 		reqPath := r.URL.Query().Get("path")
 
-		sampleInfo, ok := store.manifest.Samples[sample]
+		root, ok := store.roots[kind]
 		if !ok {
-			http.Error(w, "unknown sample", http.StatusNotFound)
+			http.Error(w, "unknown kind", http.StatusNotFound)
+			return
+		}
+		kindManifest, ok := store.manifest.Kinds[kind]
+		if !ok {
+			http.Error(w, "unknown kind", http.StatusNotFound)
 			return
 		}
 
@@ -474,9 +541,14 @@ func handleOTAFile(store *OTAStore) http.HandlerFunc {
 		}
 
 		found := false
-		for _, f := range sampleInfo.Files {
-			if f.Path == clean {
-				found = true
+		for _, unit := range kindManifest.Units {
+			for _, f := range unit.Files {
+				if f.Path == clean {
+					found = true
+					break
+				}
+			}
+			if found {
 				break
 			}
 		}
@@ -485,7 +557,7 @@ func handleOTAFile(store *OTAStore) http.HandlerFunc {
 			return
 		}
 
-		full := filepath.Join(store.dir, sample, filepath.FromSlash(clean))
+		full := filepath.Join(root, filepath.FromSlash(clean))
 		w.Header().Set("Content-Type", "application/octet-stream")
 		http.ServeFile(w, r, full)
 	}
@@ -538,11 +610,12 @@ func loggingMiddleware(next http.Handler) http.Handler {
 func main() {
 	state := NewServerState()
 
-	samplesDir := os.Getenv("SAMPLES_DIR")
-	if samplesDir == "" {
-		samplesDir = "/samples"
-	}
-	otaStore := loadOTAStore(samplesDir)
+	otaStore := loadOTAStore(map[string]string{
+		"samples": envOr("SAMPLES_DIR", "/samples"),
+		"lib":     envOr("LIB_DIR", "/lib"),
+		"mods":    envOr("MODS_DIR", "/mods"),
+		"tools":   envOr("TOOLS_DIR", "/tools"),
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/state", handleState(state))
