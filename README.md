@@ -77,6 +77,7 @@ public/
     ├── MorseCode/            Tap Morse code on SW1 and it decodes live on the display.
     ├── Nameplate/            Conference nameplate — large font name + LED patterns.
     ├── QRCodeDisplay/        Scannable QR codes on screen, switchable with the buttons.
+    ├── WaTor/                Wa-Tor predator/prey world on a 50x50 torus — viewer only.
     ├── Weather/              WiFi weather app (ZIP → forecast + LED dashboard).
     └── WiFiScanner/          Live WiFi scanner + signal-strength meter.
 ```
