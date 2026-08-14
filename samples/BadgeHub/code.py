@@ -167,6 +167,27 @@ def connect_wifi():
     print("  IP =", wifi.radio.ipv4_address)
 
 
+def reload_badge():
+    """Reload after applying an OTA update -- but power the radio down
+    first.
+
+    supervisor.reload() is a soft VM restart, not a hardware reset: it does
+    not clear ESP-IDF's WiFi state. BadgeHub is the only sample in this repo
+    that calls it, and reloading right after a batch of HTTPS OTA fetches --
+    radio associated, TLS session open -- was leaving the *next* boot's
+    wifi.radio.connect() failing with "Authentication failure", credentials
+    unchanged. Same class of gotcha badgenet.py already documents for
+    ESP-NOW needing an explicit deinit before anything reuses the radio.
+    Disabling it here first gives the next boot a clean slate to associate
+    from.
+    """
+    try:
+        wifi.radio.enabled = False
+    except Exception as exc:
+        print("BadgeHub: could not disable radio before reload:", exc)
+    supervisor.reload()
+
+
 def api_get(path):
     url = SERVER_URL + path
     r = http().get(url, timeout=HTTP_TIMEOUT)
@@ -686,7 +707,7 @@ if wifi.radio.ipv4_address:
             status_lbl.color = 0x00FF00
             display.refresh()
             time.sleep(2)
-            supervisor.reload()
+            reload_badge()
     except Exception as e:
         print("BadgeHub: OTA check failed:", e)
     update_display(current_state)
@@ -770,7 +791,7 @@ while True:
                 status_lbl.color = 0x00FF00
                 display.refresh()
                 time.sleep(2)
-                supervisor.reload()
+                reload_badge()
         except Exception as e:
             print("BadgeHub: OTA check failed:", e)
 
