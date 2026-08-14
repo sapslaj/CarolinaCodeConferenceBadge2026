@@ -68,6 +68,7 @@ public/
     ├── CCCLogo/              Splash animation — BMP logo + backlight fade + LED bounce.
     ├── DVDBounce/            Bouncing "DVD" screensaver with color-shifting LED trail.
     ├── Doom/                 Raycast FPS that plays itself — a bot marine clears the level.
+    ├── Factorio/             Factory that builds itself — belts, inserters, research.
     ├── Launcher/             Boot-time sample picker. Preloaded as code.py — restore
     │                         from here after copying another sample over code.py.
     ├── LEDLab/               Pattern + palette + speed demo across 16 patterns.
