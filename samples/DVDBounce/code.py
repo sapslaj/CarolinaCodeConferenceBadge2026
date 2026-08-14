@@ -5,8 +5,7 @@ import fourwire
 import digitalio
 import neopixel
 import adafruit_st7735r
-from adafruit_display_text import label
-import terminalio
+import adafruit_imageload
 
 # --- Backlight ---
 _bl = digitalio.DigitalInOut(board.IO5)
@@ -50,10 +49,31 @@ bg_palette = displayio.Palette(1)
 bg_palette[0] = 0x0A0A0A
 scene.append(displayio.TileGrid(bg_bitmap, pixel_shader=bg_palette))
 
-dvd = label.Label(terminalio.FONT, text="DVD", color=0xFF0000, scale=2)
-dvd.x = 10
-dvd.y = 10
+# The logo is an 8-bit indexed BMP whose palette is a *coverage ramp*:
+# index 0 is background (0% ink), the last index is solid logo (100% ink), and
+# the ones between are the antialiased edges. Nothing in the file is colored --
+# the animation loop rewrites the whole ramp every frame, so the soft edges
+# take the current hue too instead of staying a fixed grey fringe.
+logo, logo_palette = adafruit_imageload.load(
+    "/samples/DVDBounce/dvd_logo.bmp",
+    bitmap=displayio.Bitmap,
+    palette=displayio.Palette,
+)
+logo_palette.make_transparent(0)  # let the background show through
+
+dvd = displayio.TileGrid(logo, pixel_shader=logo_palette)
 scene.append(dvd)
+
+# Ink coverage per palette index. Index 0 is transparent and never written.
+LEVELS = len(logo_palette)
+SHADES = tuple(i / (LEVELS - 1) for i in range(LEVELS))
+
+
+def tint_logo(r, g, b):
+    """Recolor the ramp so the logo becomes (r, g, b) with its edges intact."""
+    for i in range(1, LEVELS):
+        c = SHADES[i]
+        logo_palette[i] = (int(r * c) << 16) | (int(g * c) << 8) | int(b * c)
 
 
 def hsv_to_rgb(h, s, v):
@@ -74,11 +94,13 @@ def hsv_to_rgb(h, s, v):
     return int(v*255), int(p*255), int(q*255)
 
 
-# Bounce boundaries derived from label size; display is 128×160 portrait
-bb = dvd.bounding_box       # (x_off, y_off, width, height)
-lbl_w, lbl_h = bb[2], bb[3]
-MAX_X = 128 - lbl_w
-MAX_Y = 160 - lbl_h
+# Bounce boundaries derived from the bitmap; display is 128×160 portrait.
+# A TileGrid's x/y IS its top-left corner, so the limits are plain subtraction
+# -- no offset correction like a scaled Label needs.
+LOGO_W, LOGO_H = logo.width, logo.height   # 88 × 53
+MIN_X = MIN_Y = 0
+MAX_X = 128 - LOGO_W
+MAX_Y = 160 - LOGO_H
 
 # DVD state
 dvd_x, dvd_y = 20.0, 30.0
@@ -118,16 +140,16 @@ while True:
         dvd_x = float(MAX_X)
         dvd_dx = -dvd_dx
         bounced = True
-    elif dvd_x < 0.0:
-        dvd_x = 0.0
+    elif dvd_x <= MIN_X:
+        dvd_x = float(MIN_X)
         dvd_dx = -dvd_dx
         bounced = True
     if dvd_y >= MAX_Y:
         dvd_y = float(MAX_Y)
         dvd_dy = -dvd_dy
         bounced = True
-    elif dvd_y < 0.0:
-        dvd_y = 0.0
+    elif dvd_y <= MIN_Y:
+        dvd_y = float(MIN_Y)
         dvd_dy = -dvd_dy
         bounced = True
 
@@ -137,6 +159,6 @@ while True:
     dvd.x = int(dvd_x)
     dvd.y = int(dvd_y)
     r, g, b = hsv_to_rgb(hue, 1.0, 1.0)
-    dvd.color = (r << 16) | (g << 8) | b
+    tint_logo(r, g, b)
 
     display.refresh()
