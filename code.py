@@ -174,13 +174,57 @@ status.anchor_point = (0.5, 0.5)
 status.anchored_position = (64, 22)
 scene.append(status)
 
-item_labels = []
-for i, name in enumerate(SAMPLES):
-    lbl = label.Label(terminalio.FONT, text=name, color=0x808080)
+# Scrolling viewport. The screen is only 160 px tall and the title /
+# status / hints claim the top and bottom, so only a window of items
+# fits on screen at once. Instead of one label per sample (which
+# would pile up off the bottom), we keep a small fixed pool of row
+# labels and repoint them at the current scroll window -- no need for
+# a per-label "hidden" property, which older adafruit_display_text
+# builds don't expose.
+LIST_TOP_Y = 40          # y of the first visible row
+LIST_STEP = 12           # pixels between rows
+LIST_BOTTOM_Y = 134      # rows below this are off-screen
+VISIBLE_COUNT = (LIST_BOTTOM_Y - LIST_TOP_Y) // LIST_STEP + 1  # rows
+scroll_top = 0           # index of the first sample currently shown
+
+# Pool of reusable row labels. Only as many as can ever be on screen
+# (or the sample count, whichever is smaller) are allocated.
+pool_size = min(VISIBLE_COUNT, len(SAMPLES)) if SAMPLES else 0
+row_labels = []
+for _ in range(pool_size):
+    lbl = label.Label(terminalio.FONT, text="", color=0x808080)
     lbl.anchor_point = (0.5, 0.5)
-    lbl.anchored_position = (64, 40 + i * 12)
     scene.append(lbl)
-    item_labels.append(lbl)
+    row_labels.append(lbl)
+
+
+def layout(idx):
+    """Point the row-label pool at the window around `idx`, scrolling
+    so the selection always stays on screen."""
+    global scroll_top
+    if not row_labels or not SAMPLES:
+        return
+    # Keep the selection inside the visible window.
+    if idx < scroll_top:
+        scroll_top = idx
+    elif idx >= scroll_top + pool_size:
+        scroll_top = idx - pool_size + 1
+    # Clamp the window to the list bounds.
+    max_top = max(0, len(SAMPLES) - pool_size)
+    if scroll_top > max_top:
+        scroll_top = max_top
+    if scroll_top < 0:
+        scroll_top = 0
+    for row in range(pool_size):
+        i = scroll_top + row
+        lbl = row_labels[row]
+        if i < len(SAMPLES):
+            lbl.text = SAMPLES[i]
+            lbl.anchored_position = (64, LIST_TOP_Y + row * LIST_STEP)
+            lbl.color = 0xFFFF00 if i == idx else 0x808080
+        else:
+            lbl.text = ""
+
 
 hint1 = label.Label(terminalio.FONT, text="S1:up  S2:down", color=0x606060)
 hint1.anchor_point = (0.5, 0.5)
@@ -196,8 +240,7 @@ display.root_group = scene
 
 
 def highlight(idx):
-    for i, lbl in enumerate(item_labels):
-        lbl.color = 0xFFFF00 if i == idx else 0x808080
+    layout(idx)
 
 
 # ------------------------------------------------------------------

@@ -18,14 +18,17 @@ Controls
 
 Long names auto-scale down so they still fit the display.
 """
+import os
 
 # ==============================================================
 #   >>>  YOUR NAME  <<<
 #   Edit these two strings, save the file, and the display and
 #   LEDs will update automatically. Uppercase looks best.
 # ==============================================================
-FIRST_NAME = "HELLO"
-LAST_NAME  = "WORLD"
+
+
+FIRST_NAME = os.getenv("FIRST_NAME", "YOUR")
+LAST_NAME  = os.getenv("LAST_NAME", "NAME")
 # ==============================================================
 
 
