@@ -3,8 +3,6 @@ kind: Ingress
 metadata:
   name: badge-hub
   namespace: badge-hub
-  annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: crowdsec-bouncer@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:
