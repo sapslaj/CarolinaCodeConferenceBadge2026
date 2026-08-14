@@ -69,6 +69,7 @@ public/
     ├── DVDBounce/            Bouncing "DVD" screensaver with color-shifting LED trail.
     ├── Doom/                 Raycast FPS that plays itself — a bot marine clears the level.
     ├── Factorio/             Factory that builds itself — belts, inserters, research.
+    ├── GifPlayer/            Plays GIFs from /gifs/ or pulls them from GIPHY.
     ├── Launcher/             Boot-time sample picker. Preloaded as code.py — restore
     │                         from here after copying another sample over code.py.
     ├── LEDLab/               Pattern + palette + speed demo across 16 patterns.

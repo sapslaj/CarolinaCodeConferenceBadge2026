@@ -21,3 +21,9 @@
 # --- WiFi credentials (used by any program that connects to WiFi) ---
 WIFI_SSID     = "your-network"
 WIFI_PASSWORD = "your-password"
+
+# --- GIPHY API key (used by samples/GifPlayer) ---
+# Free key from https://developers.giphy.com/dashboard/ -- create an app
+# and copy its API key here. Only the GifPlayer sample reads this, and it
+# still plays GIFs from /gifs/ without one.
+GIPHY_API_KEY = ""
