@@ -8,10 +8,9 @@ each other up and down for as long as the badge is on.
 
 This started as a port of the viewer frame from the `wa-tor-whirl`
 browser toy and kept its rules, its colours and its habit of running
-with no controls at all. The frame itself is gone: the world now uses
-the whole 128x160 panel, one world cell per pixel, so what you see is
-the grid itself at full resolution rather than a canvas inside a
-border.
+with no controls at all. The frame itself is gone: the world fills the
+whole 128x160 panel, 64x80 cells drawn two pixels square, so what you
+see is the grid itself rather than a canvas inside a border.
 
 The rules are the page's rules, quirks included: *every* creature
 spends one energy per move, so fish starve too, and a creature that is
@@ -21,26 +20,29 @@ that turn.
 Why the numbers are not the page's
 ----------------------------------
 The page runs 500 fish and 125 sharks on a 50x50 canvas and settles at
-roughly half a full grid. Scaled to 20480 cells that would be ~11000
+roughly half a full grid. Scaled up that would be thousands of
 creatures a turn, which is more than this hardware wants to move, so
 the biology here is retuned for a thinly populated ocean:
 
-    world       128 x 160  (20480 cells, one per pixel)
+    world       64 x 80  (5120 cells, each drawn 2x2 px)
     speed       200 ms per turn
-    fish        400 start, energy 62, breeds every 30 moves
-    sharks      100 start, energy 16, breeds every 20 moves, meal = 30
+    fish        150 start, energy 42, breeds every 20 moves
+    sharks       40 start, energy 12, breeds every 16 moves, meal = 12
 
 The lever that sets how crowded the world gets is what a meal is
 worth. A shark spends 1 energy a move and meets a fish on about
 4 * (fish density) of its moves, so it only breaks even where
 4 * density * meal >= 1: with the page's meal of 1 that needs a 25%
-fish density, and with a meal of 30 it needs under 1%. Slowing fish
-breeding down from every 2 moves to every 30 keeps them from simply
+fish density, and with a meal of 12 it needs about 2%. Slowing fish
+breeding down from every 2 moves to every 20 keeps them from simply
 filling the empty space that leaves.
 
-The result averages about 1000 creatures, but it is Wa-Tor, so it
-booms and crashes -- expect anything from a few dozen to a few
-thousand, and a fresh world when one species finally loses.
+That holds about 260 creatures, some 5% of the grid, but it is Wa-Tor,
+so it booms and crashes -- expect anything from a few dozen to a
+couple of thousand. A world this size is also small enough for a bad
+crash to finish it: they run about seven minutes before one species
+loses and the next world starts. The 128x160 version of this world
+lasted three times as long, which is the price of the bigger cells.
 
 Controls
 --------
@@ -51,11 +53,10 @@ How this is fast enough
 -----------------------
 The browser version keeps a list of creature objects and reads the
 world back out of the canvas with `getImageData`. Neither idea
-survives contact with a microcontroller: 20480 dict-ish objects would
-eat the heap many times over, and per-creature `findIndex` scans are
-quadratic.
+survives contact with a microcontroller: thousands of dict-ish objects
+would eat the heap, and per-creature `findIndex` scans are quadratic.
 
-So the world *is* the state here. `cells` is one flat array of 20480
+So the world *is* the state here. `cells` is one flat array of 5120
 16-bit words, and each creature is packed into a single word:
 
     bit 0-1   type   1 = fish, 2 = shark   (0 = open ocean)
@@ -63,9 +64,8 @@ So the world *is* the state here. `cells` is one flat array of 20480
     bit 7-14  chi    energy left                (0-255)
     bit 15    stamp  "already took its turn this tick"
 
-That is 40 KB as an `array("H")` and would be 80 KB as a list of
-Python ints, which is the difference between fitting on this board and
-not. The stamp bit flips its meaning every tick, which saves walking
+That is 10 KB as an `array("H")` against 20 KB as a list of Python
+ints. The stamp bit flips its meaning every tick, which saves walking
 the grid to clear it: a creature that moves into a cell the tick has
 not reached yet is skipped rather than moving twice.
 
@@ -73,10 +73,10 @@ Three more things keep the tick cheap:
 
   * `cells` and the bitmap use the *same* flat index, so drawing a
     creature is one `bmp[idx]` store -- no index-to-(x, y) conversion,
-    and at one cell per pixel no scaling either.
+    and the group's `scale` does the zoom to screen size in C.
   * The tick carries its own work list: every creature that survives
     appends where it ended up, so the next tick starts from a list of
-    occupied cells instead of rescanning all 20480. Entries can go
+    occupied cells instead of rescanning all 5120. Entries can go
     stale (eaten fish), which the stamp check already catches.
   * Fish outnumber sharks and only ever look for open water, so their
     neighbour scan is unrolled and skips the "is that prey?" test.
@@ -110,18 +110,19 @@ from array import array
 # not the page's -- the short version is that a meal worth 30 is what
 # lets sharks live in a thinly populated ocean.
 # ==================================================================
-COLS = 128                   # one cell per pixel, the whole panel
-ROWS = 160
+COLS = 64                    # 64 x 80 cells drawn 2x2 -> the whole panel
+ROWS = 80
+CELL = 2                     # pixels per cell; COLS*CELL must be 128
 PLAY_SPEED = 0.2             # seconds per turn
 
-STARTING_FISH = 400
-START_FISH_CHI = 62          # moves a fish lives without breeding
-FISH_FERT_RATE = 30          # moves between calves  (max 31, 5 bits)
-FISH_WEIGHT = 30             # energy a shark gains from a meal
+STARTING_FISH = 150
+START_FISH_CHI = 42          # moves a fish lives without breeding
+FISH_FERT_RATE = 20          # moves between calves  (max 31, 5 bits)
+FISH_WEIGHT = 12             # energy a shark gains from a meal
 
-STARTING_SHARKS = 100
-START_SHARK_CHI = 16         # moves a shark lives between meals
-SHARK_FERT_RATE = 20         # moves between pups    (max 31, 5 bits)
+STARTING_SHARKS = 40
+START_SHARK_CHI = 12         # moves a shark lives between meals
+SHARK_FERT_RATE = 16         # moves between pups    (max 31, 5 bits)
 
 OCEAN = 0                    # also the empty-cell marker
 FISH = 1
@@ -183,7 +184,11 @@ display = adafruit_st7735r.ST7735R(
 
 
 # ==================================================================
-# Scene -- one bitmap, one pixel per cell, filling the panel.
+# Scene -- one bitmap at world resolution, blown up to fill the panel.
+#
+# The bitmap stays 64x80 and a Group with `scale=CELL` doubles it to
+# 128x160: displayio does the zoom in C, so drawing a creature is one
+# store into a small bitmap rather than four stores into a big one.
 # ==================================================================
 palette = displayio.Palette(3)
 palette[OCEAN] = C_OCEAN
@@ -191,7 +196,7 @@ palette[FISH] = C_FISH
 palette[SHARK] = C_SHARK
 
 grid_bmp = displayio.Bitmap(COLS, ROWS, 3)
-scene = displayio.Group()
+scene = displayio.Group(scale=CELL)
 scene.append(displayio.TileGrid(grid_bmp, pixel_shader=palette))
 display.root_group = scene
 
@@ -200,7 +205,7 @@ display.root_group = scene
 # The world
 # ==================================================================
 # 16-bit words, one per cell. Built from a zero-filled bytes object so
-# it never has to exist as a 20480-element Python list.
+# it never has to exist as a 5120-element Python list.
 cells = array("H", bytes(2 * CELL_COUNT))
 
 queue = []                   # where the creatures are, from last tick
