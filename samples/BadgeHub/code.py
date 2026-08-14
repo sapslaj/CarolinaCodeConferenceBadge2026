@@ -88,6 +88,18 @@ OTA_KINDS = {
 OTA_STATE_PATH = "/samples/.ota_state.json"
 OTA_CHECK_INTERVAL = 60.0
 
+# A badge's very first sync can have dozens of units pending at once (every
+# sample, lib package, mod, tool -- everything). Applying all of them in one
+# check is a burst of back-to-back TLS handshakes with no gap, which is
+# exactly the failure mode badgexfer.py already documents for this hardware
+# ("unpaced sends saturate the TX queue"): measured here as ETIMEDOUT and
+# assorted negative mbedtls/lwIP error codes partway through a big batch.
+# Capping the batch bounds how long one check can block the main loop (no
+# button/LED service happens during it) and how much TLS churn happens back
+# to back; OTA_CHECK_INTERVAL just runs it again next cycle for the rest.
+OTA_BATCH_LIMIT = 5
+OTA_REQUEST_PACE = 0.25
+
 # Same gotcha GifPlayer's download() already works around: a stalled read
 # on this hardware just blocks forever with no exception, not even the
 # generic `except Exception` wrapped around every caller here can save you
@@ -262,6 +274,7 @@ def save_ota_state(state):
 
 
 def ota_download_file(kind, rel_path, dest_path):
+    time.sleep(OTA_REQUEST_PACE)
     url = SERVER_URL + "/api/ota/file?kind=" + kind + "&path=" + rel_path
     r = http().get(url, timeout=HTTP_TIMEOUT)
     try:
@@ -308,9 +321,20 @@ def check_ota_updates():
     followed by a fresh boot. Splitting the payload is the fix, not just a
     speed-up.
 
-    Sends one telemetry line per call (see send_telemetry) so this whole
-    flow -- fetch, diff, write-access, apply -- can be watched from the
-    admin page while the badge runs untethered with no serial console.
+    Applies at most OTA_BATCH_LIMIT units per call, paced OTA_REQUEST_PACE
+    seconds apart -- a first sync can have dozens of units pending at once,
+    and applying them all in one unpaced burst was timing out partway
+    through (ETIMEDOUT and assorted mbedtls/lwIP errors). State is saved
+    after each unit, not just at the end, so a batch that gets interrupted
+    keeps its progress; the remainder picks up on the next check.
+
+    Sends telemetry at each step, including per-unit (see send_telemetry),
+    so this whole flow -- fetch, diff, write-access, apply -- can be
+    watched live from the admin page while the badge runs untethered with
+    no serial console. Every telemetry send is paced the same as the
+    file/unit fetches, immediately before it: per-unit visibility was worth
+    keeping, but only once it stopped being an unpaced burst on top of an
+    already-unpaced burst.
     """
     send_telemetry("starting OTA check")
     try:
@@ -337,42 +361,54 @@ def check_ota_updates():
         send_telemetry("ota: up to date (%d units on server)" % total_units)
         return False
 
-    send_telemetry("ota: %d/%d unit(s) pending: %s" % (
-        len(pending), total_units,
-        ", ".join("%s/%s" % (k, n) for k, n in pending[:8])))
+    batch = pending[:OTA_BATCH_LIMIT]
+    rest = len(pending) - len(batch)
+    send_telemetry("ota: %d/%d unit(s) pending, applying %d this check: %s" % (
+        len(pending), total_units, len(batch),
+        ", ".join("%s/%s" % (k, n) for k, n in batch)))
 
     if not make_writable():
         send_telemetry("ota: filesystem read-only (USB tethered?), cannot apply")
         return False
 
+    # Per-unit telemetry is paced same as the file/unit fetches, right
+    # before each send -- not skipped. Without the pace, a telemetry POST
+    # per unit was itself part of the original overload; with it, it's just
+    # one more request in the same paced sequence as everything else.
     updated = False
     applied = []
     failed = []
     try:
-        for kind, name in pending:
-            send_telemetry(f"BadgeHub: OTA updating {kind} {name}")
+        for kind, name in batch:
+            print("BadgeHub: OTA updating", kind, name)
+            time.sleep(OTA_REQUEST_PACE)
+            send_telemetry("ota: updating %s/%s" % (kind, name))
+            time.sleep(OTA_REQUEST_PACE)
             try:
                 info = api_get("/api/ota/unit?kind=" + kind + "&name=" + name)
             except Exception as exc:
-                send_telemetry(f"BadgeHub: OTA unit fetch failed: {kind} {name} {exc}")
+                print("BadgeHub: OTA unit fetch failed:", kind, name, exc)
+                time.sleep(OTA_REQUEST_PACE)
+                send_telemetry("ota: unit fetch failed: %s/%s %s" % (kind, name, exc))
                 failed.append("%s/%s" % (kind, name))
                 continue
             if apply_unit_update(kind, info):
                 state[kind][name] = info["hash"]
+                save_ota_state(state)
                 updated = True
                 applied.append("%s/%s" % (kind, name))
             else:
-                send_telemetry(f"BadgeHub: OTA update incomplete, will retry: {kind} {name}")
+                print("BadgeHub: OTA update incomplete, will retry:", kind, name)
+                time.sleep(OTA_REQUEST_PACE)
+                send_telemetry("ota: update incomplete, will retry: %s/%s" % (kind, name))
                 failed.append("%s/%s" % (kind, name))
             info = None
             gc.collect()
-        if updated:
-            save_ota_state(state)
     finally:
         make_readonly()
 
-    send_telemetry("ota: applied %d, failed %d%s" % (
-        len(applied), len(failed),
+    send_telemetry("ota: applied %d, failed %d, %d remaining%s" % (
+        len(applied), len(failed), rest,
         (" (" + ", ".join(failed[:8]) + ")") if failed else ""))
 
     return updated
