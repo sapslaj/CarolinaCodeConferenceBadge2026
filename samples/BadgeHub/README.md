@@ -53,3 +53,42 @@ computer has CIRCUITPY mounted, OTA checks quietly no-op (a message
 goes to the serial console, nothing changes on screen) and retry on the
 next check. Updates apply normally when the badge is running untethered
 on battery.
+
+Batching, pacing, and telemetry. A badge's very first sync can have
+dozens of units pending at once (every sample, lib package, mod, tool).
+`OTA_BATCH_LIMIT` (5) caps how many units one check applies -- the rest
+wait for the next 60s cycle -- so one check can't block the main loop
+(no button/LED service happens during it) for minutes at a stretch.
+`OTA_REQUEST_PACE` (0.25s) sits before every OTA-related network call,
+including telemetry sends: applying a full batch unpaced was measured
+timing out partway through (`ETIMEDOUT` and assorted negative
+mbedtls/lwIP error codes) -- this hardware's TLS/socket layer needs a
+gap between back-to-back requests, the same lesson `badgexfer.py`
+documents for ESP-NOW ("unpaced sends saturate the TX queue"). State
+saves after every successfully-applied unit, not just at the end of a
+batch, so an interrupted batch keeps its progress instead of retrying
+from scratch.
+
+`reload_badge()` sets `wifi.radio.enabled = False` before calling
+`supervisor.reload()`. That reload is a soft VM restart, not a hardware
+reset -- it doesn't clear ESP-IDF's WiFi state, and reloading right
+after a batch of HTTPS OTA fetches (radio associated, TLS session open)
+was leaving the *next* boot's `wifi.radio.connect()` failing with
+"Authentication failure", credentials unchanged. Same class of gotcha
+`badgenet.py` already documents for ESP-NOW needing an explicit
+`deinit()` before anything reuses the radio.
+
+A close relative of that bug, worth knowing about: this whole file is
+`exec()`'d as one script by the Launcher, top to bottom, and every
+docstring becomes a real string object the moment its `def` runs --
+*before* `connect_wifi()` is ever reached, since that call sits near
+the bottom of the file. A commit that added ~2 KB of prose-heavy
+docstrings (bisected to confirm) pushed the module's memory footprint
+far enough to start failing that same WPA handshake with the identical
+"Authentication failure" message, no code-path connection between the
+two at all -- just competing for the same heap at the same moment.
+Keep `code.py`'s docstrings and comments terse; put rationale here
+instead, in a file that's never executed on the badge and so costs it
+nothing. `mods/README.md` documents the identical tradeoff for a
+different resource (network airtime instead of RAM), for modules that
+travel over ESP-NOW -- same principle, different budget.

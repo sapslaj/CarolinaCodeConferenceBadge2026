@@ -1,49 +1,10 @@
 """
-BadgeHub -- Conference badge connected to a server
-===================================================
-Connects to a server over HTTP and displays broadcasts, runs light
-commands, lets you vote in polls, and shows your mood. Works with the
-badge-hub server in this repo.
-
-Setup
------
-1. Put WiFi credentials in settings.toml:
-   WIFI_SSID = "your-wifi"
-   WIFI_PASSWORD = "your-password"
-
-2. Set the server URL below (use https:// if behind ingress):
-   SERVER_URL = "https://badge.sapslaj.cloud"
-
-3. Set your name:
-   MY_NAME = "YOUR NAME"
-
-4. Save and the badge connects automatically.
-
-Controls
---------
-  SW1 (IO1)   -- cycle mood   (happy / excited / tired / hungry / cool)
-  SW2 (IO2)   -- vote in active poll (cycles through options, press to vote)
-  SW3 (IO43)  -- toggle between hub view and clock view
-
-The badge checks in with the server on boot, then polls /api/state every
-5 seconds for updates (broadcasts, light commands, poll changes, room mood).
-
-OTA updates
------------
-Every 60 seconds BadgeHub also asks the server for a manifest covering
-/samples/, /lib/, /mods/, and /tools/ (see server/main.go). Each top-level
-entry in those directories -- a sample folder, a lib package, a mod, a
-tool script -- is hashed on its own, so only what actually changed gets
-pulled. The manifest itself carries hashes only, no file lists -- that
-detail is fetched separately, one unit at a time, only for units whose
-hash actually differs. Anything that changed is downloaded straight onto
-the CIRCUITPY drive, and BadgeHub reboots to pick it up.
-
-Like GifPlayer's GIPHY mode, this needs write access to the badge's own
-filesystem, which CircuitPython only grants when the host computer isn't
-holding it (i.e. running on battery, or with CIRCUITPY unmounted/ejected).
-Plugged into a computer for development, updates are simply skipped with a
-message on the serial console -- nothing on screen changes.
+BadgeHub -- conference badge connected to a server. Settings: WIFI_SSID /
+WIFI_PASSWORD in settings.toml, SERVER_URL / MY_NAME below. SW1 mood,
+SW2 vote, SW3 hub/clock view. Also the OTA client for samples/lib/mods/
+tools -- see README.md, kept out of here on purpose: this whole file is
+exec()'d in one pass before WiFi even connects, so every docstring here
+is RAM taken from the WPA handshake, not just disk space. Keep it terse.
 """
 
 import os
@@ -87,23 +48,8 @@ OTA_KINDS = {
 }
 OTA_STATE_PATH = "/samples/.ota_state.json"
 OTA_CHECK_INTERVAL = 60.0
-
-# A badge's very first sync can have dozens of units pending at once (every
-# sample, lib package, mod, tool -- everything). Applying all of them in one
-# check is a burst of back-to-back TLS handshakes with no gap, which is
-# exactly the failure mode badgexfer.py already documents for this hardware
-# ("unpaced sends saturate the TX queue"): measured here as ETIMEDOUT and
-# assorted negative mbedtls/lwIP error codes partway through a big batch.
-# Capping the batch bounds how long one check can block the main loop (no
-# button/LED service happens during it) and how much TLS churn happens back
-# to back; OTA_CHECK_INTERVAL just runs it again next cycle for the rest.
-OTA_BATCH_LIMIT = 5
-OTA_REQUEST_PACE = 0.25
-
-# Same gotcha GifPlayer's download() already works around: a stalled read
-# on this hardware just blocks forever with no exception, not even the
-# generic `except Exception` wrapped around every caller here can save you
-# from a request that never times out on its own.
+OTA_BATCH_LIMIT = 5     # units per check -- bounds one check's blocking time
+OTA_REQUEST_PACE = 0.25 # seconds between OTA requests -- see README.md
 HTTP_TIMEOUT = 15
 # ==============================================================
 
@@ -168,19 +114,7 @@ def connect_wifi():
 
 
 def reload_badge():
-    """Reload after applying an OTA update -- but power the radio down
-    first.
-
-    supervisor.reload() is a soft VM restart, not a hardware reset: it does
-    not clear ESP-IDF's WiFi state. BadgeHub is the only sample in this repo
-    that calls it, and reloading right after a batch of HTTPS OTA fetches --
-    radio associated, TLS session open -- was leaving the *next* boot's
-    wifi.radio.connect() failing with "Authentication failure", credentials
-    unchanged. Same class of gotcha badgenet.py already documents for
-    ESP-NOW needing an explicit deinit before anything reuses the radio.
-    Disabling it here first gives the next boot a clean slate to associate
-    from.
-    """
+    """supervisor.reload() after powering the radio down -- see README.md."""
     try:
         wifi.radio.enabled = False
     except Exception as exc:
@@ -209,17 +143,7 @@ def api_post(path, body):
 
 
 def send_telemetry(message):
-    """Log a message to the server, tagged with this badge's id and name --
-    and always to the badge's own serial console too, via the regular
-    print()-based logging every other function here uses.
-
-    A debug backchannel for exactly the situation this badge is usually
-    in when something is wrong: on battery, no serial console readily
-    available, and the display already busy showing something else. The
-    print() is what's left when the server can't be reached at all, which
-    is itself useful information -- best-effort, since a failed telemetry
-    send must never be the thing that takes the badge down.
-    """
+    """print() + best-effort POST to /api/telemetry -- see README.md."""
     print("BadgeHub:", message)
     if not wifi.radio.ipv4_address:
         return
@@ -238,12 +162,6 @@ def send_telemetry(message):
 # OTA updates (samples, lib, mods)
 # ------------------------------------------------------------------
 def make_writable():
-    """Try to get write access to the badge's own filesystem.
-
-    Same tradeoff GifPlayer's GIPHY mode makes: CircuitPython hands write
-    access to exactly one of the badge and the host computer, so this
-    fails (harmlessly) whenever a computer has CIRCUITPY mounted.
-    """
     try:
         storage.remount("/", readonly=False)
         return True
@@ -267,8 +185,6 @@ def ensure_dir(path):
 
 
 def ensure_dirs_for(file_path):
-    """Create every directory component of a file path that is missing.
-    Samples are mostly flat, but GifPlayer ships a tools/ subfolder."""
     parts = file_path.split("/")[:-1]
     cur = ""
     for part in parts:
@@ -315,11 +231,6 @@ def ota_download_file(kind, rel_path, dest_path):
 
 
 def apply_unit_update(kind, info):
-    """Download every file listed for one unit (a sample folder, a lib
-    package, a mod). Every file's path already comes back from the server
-    relative to the kind's root, so ensure_dirs_for handles nesting on its
-    own. Only succeeds (and is only recorded as applied) if every file
-    lands cleanly -- a half-written unit is worse than a stale one."""
     kind_dir = OTA_KINDS[kind]
     for f in info["files"]:
         dest = kind_dir + "/" + f["path"]
@@ -329,34 +240,7 @@ def apply_unit_update(kind, info):
 
 
 def check_ota_updates():
-    """Compare the server's manifest -- samples, lib, mods, tools -- against
-    what's on the badge and pull down anything that changed. Returns True
-    if at least one unit was updated.
-
-    Two fetches, deliberately. /api/ota/manifest returns hashes only, no
-    file lists -- small enough to pull every cycle even when nothing
-    changed. /api/ota/unit, which does carry a unit's file list, is only
-    fetched for units whose hash actually differs. An earlier version
-    fetched one big combined manifest (~17 KB of JSON) and reliably crashed
-    the badge parsing it -- confirmed by telemetry dead-ending mid-fetch,
-    followed by a fresh boot. Splitting the payload is the fix, not just a
-    speed-up.
-
-    Applies at most OTA_BATCH_LIMIT units per call, paced OTA_REQUEST_PACE
-    seconds apart -- a first sync can have dozens of units pending at once,
-    and applying them all in one unpaced burst was timing out partway
-    through (ETIMEDOUT and assorted mbedtls/lwIP errors). State is saved
-    after each unit, not just at the end, so a batch that gets interrupted
-    keeps its progress; the remainder picks up on the next check.
-
-    Sends telemetry at each step, including per-unit (see send_telemetry),
-    so this whole flow -- fetch, diff, write-access, apply -- can be
-    watched live from the admin page while the badge runs untethered with
-    no serial console. Every telemetry send is paced the same as the
-    file/unit fetches, immediately before it: per-unit visibility was worth
-    keeping, but only once it stopped being an unpaced burst on top of an
-    already-unpaced burst.
-    """
+    """Diff+apply against the server's OTA manifest. See README.md."""
     send_telemetry("starting OTA check")
     try:
         manifest = api_get("/api/ota/manifest")
