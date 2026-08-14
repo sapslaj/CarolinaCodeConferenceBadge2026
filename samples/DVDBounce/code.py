@@ -97,7 +97,7 @@ def hsv_to_rgb(h, s, v):
 # Bounce boundaries derived from the bitmap; display is 128×160 portrait.
 # A TileGrid's x/y IS its top-left corner, so the limits are plain subtraction
 # -- no offset correction like a scaled Label needs.
-LOGO_W, LOGO_H = logo.width, logo.height   # 88 × 53
+LOGO_W, LOGO_H = logo.width, logo.height   # 44 × 26
 MIN_X = MIN_Y = 0
 MAX_X = 128 - LOGO_W
 MAX_Y = 160 - LOGO_H
