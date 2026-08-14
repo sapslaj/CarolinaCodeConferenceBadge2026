@@ -49,12 +49,25 @@ type Poll struct {
 	Votes    map[string]string `json:"-"`
 }
 
+type TelemetryEntry struct {
+	Time      time.Time `json:"time"`
+	ID        string    `json:"id"`
+	FirstName string    `json:"first_name"`
+	LastName  string    `json:"last_name"`
+	Message   string    `json:"message"`
+}
+
+// telemetryCap bounds the in-memory ring buffer so a badge stuck in a
+// retry loop can't grow this without limit -- old entries just fall off.
+const telemetryCap = 500
+
 type ServerState struct {
 	mu        sync.RWMutex
 	broadcast Broadcast
 	lights    LightCommand
 	poll      Poll
 	badges    map[string]*Badge
+	telemetry []TelemetryEntry
 }
 
 // ---- API Request types ----
@@ -87,6 +100,13 @@ type LightsRequest struct {
 type PollRequest struct {
 	Question string   `json:"question"`
 	Options  []string `json:"options"`
+}
+
+type TelemetryRequest struct {
+	ID        string `json:"id"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	Message   string `json:"message"`
 }
 
 // ---- API Response types ----
@@ -240,6 +260,44 @@ func handleMood(s *ServerState) http.HandlerFunc {
 	}
 }
 
+// handleTelemetry is a debug backchannel: badges log free-text messages
+// here so problems (like OTA silently not applying) can be diagnosed while
+// running untethered on battery, with no serial console available.
+func handleTelemetry(s *ServerState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req TelemetryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if req.Message == "" {
+			http.Error(w, "missing message", http.StatusBadRequest)
+			return
+		}
+
+		entry := TelemetryEntry{
+			Time:      time.Now(),
+			ID:        req.ID,
+			FirstName: req.FirstName,
+			LastName:  req.LastName,
+			Message:   req.Message,
+		}
+
+		logger.Info("badge telemetry",
+			"id", req.ID, "first_name", req.FirstName, "last_name", req.LastName,
+			"message", req.Message)
+
+		s.mu.Lock()
+		s.telemetry = append(s.telemetry, entry)
+		if len(s.telemetry) > telemetryCap {
+			s.telemetry = s.telemetry[len(s.telemetry)-telemetryCap:]
+		}
+		s.mu.Unlock()
+
+		writeJSON(w, map[string]any{"ok": true})
+	}
+}
+
 func handleVote(s *ServerState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req VoteRequest
@@ -355,6 +413,22 @@ func handleAdminBadges(s *ServerState) http.HandlerFunc {
 		s.mu.Unlock()
 
 		writeJSON(w, badges)
+	}
+}
+
+// handleAdminTelemetry serves the most recent entries newest-first, so
+// this can be watched from a browser (the admin UI) with no shell access
+// to the pod -- the point of the endpoint in the first place.
+func handleAdminTelemetry(s *ServerState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.mu.RLock()
+		out := make([]TelemetryEntry, len(s.telemetry))
+		for i, e := range s.telemetry {
+			out[len(s.telemetry)-1-i] = e
+		}
+		s.mu.RUnlock()
+
+		writeJSON(w, out)
 	}
 }
 
@@ -627,6 +701,8 @@ func main() {
 	mux.HandleFunc("POST /api/admin/poll", handleAdminPollStart(state))
 	mux.HandleFunc("DELETE /api/admin/poll", handleAdminPollStop(state))
 	mux.HandleFunc("GET /api/admin/badges", handleAdminBadges(state))
+	mux.HandleFunc("POST /api/telemetry", handleTelemetry(state))
+	mux.HandleFunc("GET /api/admin/telemetry", handleAdminTelemetry(state))
 	mux.HandleFunc("GET /api/ota/manifest", handleOTAManifest(otaStore))
 	mux.HandleFunc("GET /api/ota/file", handleOTAFile(otaStore))
 	mux.HandleFunc("GET /healthz/liveness", handleLiveness)

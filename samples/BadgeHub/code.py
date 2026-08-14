@@ -167,6 +167,27 @@ def api_post(path, body):
     return data
 
 
+def send_telemetry(message):
+    """Log a message to the server, tagged with this badge's id and name.
+
+    A debug backchannel for exactly the situation this badge is usually
+    in when something is wrong: on battery, no serial console, and the
+    display already busy showing something else. Best-effort -- a failed
+    telemetry send must never be the thing that takes the badge down.
+    """
+    if not wifi.radio.ipv4_address:
+        return
+    try:
+        api_post("/api/telemetry", {
+            "id": get_badge_id(),
+            "first_name": os.getenv("FIRST_NAME", ""),
+            "last_name": os.getenv("LAST_NAME", ""),
+            "message": message[:200],
+        })
+    except Exception as exc:
+        print("BadgeHub: telemetry send failed:", exc)
+
+
 # ------------------------------------------------------------------
 # OTA updates (samples, lib, mods)
 # ------------------------------------------------------------------
@@ -261,16 +282,23 @@ def apply_unit_update(kind, info):
 
 
 def check_ota_updates():
-    """Compare the server's manifest -- samples, lib, and mods -- against
+    """Compare the server's manifest -- samples, lib, mods, tools -- against
     what's on the badge and pull down anything that changed. Returns True
-    if at least one unit was updated."""
+    if at least one unit was updated.
+
+    Sends one telemetry line per call (see send_telemetry) so this whole
+    flow -- fetch, diff, write-access, apply -- can be watched from the
+    admin page while the badge runs untethered with no serial console.
+    """
     try:
         manifest = api_get("/api/ota/manifest")
     except Exception as exc:
         print("BadgeHub: OTA manifest fetch failed:", exc)
+        send_telemetry("ota: manifest fetch failed: %s" % exc)
         return False
 
     kinds = manifest.get("kinds", {})
+    total_units = sum(len(k.get("units", {})) for k in kinds.values())
     state = load_ota_state()
     pending = []
     for kind in OTA_KINDS:
@@ -281,24 +309,38 @@ def check_ota_updates():
                 pending.append((kind, name, info))
 
     if not pending:
+        send_telemetry("ota: up to date (%d units on server)" % total_units)
         return False
 
+    send_telemetry("ota: %d/%d unit(s) pending: %s" % (
+        len(pending), total_units,
+        ", ".join("%s/%s" % (k, n) for k, n, _ in pending[:8])))
+
     if not make_writable():
+        send_telemetry("ota: filesystem read-only (USB tethered?), cannot apply")
         return False
 
     updated = False
+    applied = []
+    failed = []
     try:
         for kind, name, info in pending:
             print("BadgeHub: OTA updating", kind, name)
             if apply_unit_update(kind, info):
                 state[kind][name] = info["hash"]
                 updated = True
+                applied.append("%s/%s" % (kind, name))
             else:
                 print("BadgeHub: OTA update incomplete, will retry:", kind, name)
+                failed.append("%s/%s" % (kind, name))
         if updated:
             save_ota_state(state)
     finally:
         make_readonly()
+
+    send_telemetry("ota: applied %d, failed %d%s" % (
+        len(applied), len(failed),
+        (" (" + ", ".join(failed[:8]) + ")") if failed else ""))
 
     return updated
 
