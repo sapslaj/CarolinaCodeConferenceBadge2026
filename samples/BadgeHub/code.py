@@ -85,6 +85,12 @@ OTA_KINDS = {
 }
 OTA_STATE_PATH = "/samples/.ota_state.json"
 OTA_CHECK_INTERVAL = 60.0
+
+# Same gotcha GifPlayer's download() already works around: a stalled read
+# on this hardware just blocks forever with no exception, not even the
+# generic `except Exception` wrapped around every caller here can save you
+# from a request that never times out on its own.
+HTTP_TIMEOUT = 15
 # ==============================================================
 
 
@@ -149,7 +155,7 @@ def connect_wifi():
 
 def api_get(path):
     url = SERVER_URL + path
-    r = http().get(url)
+    r = http().get(url, timeout=HTTP_TIMEOUT)
     try:
         data = r.json()
     finally:
@@ -159,7 +165,7 @@ def api_get(path):
 
 def api_post(path, body):
     url = SERVER_URL + path
-    r = http().post(url, json=body)
+    r = http().post(url, json=body, timeout=HTTP_TIMEOUT)
     try:
         data = r.json()
     finally:
@@ -255,7 +261,7 @@ def save_ota_state(state):
 
 def ota_download_file(kind, rel_path, dest_path):
     url = SERVER_URL + "/api/ota/file?kind=" + kind + "&path=" + rel_path
-    r = http().get(url)
+    r = http().get(url, timeout=HTTP_TIMEOUT)
     try:
         if r.status_code != 200:
             print("BadgeHub: OTA fetch failed:", kind, rel_path, r.status_code)
