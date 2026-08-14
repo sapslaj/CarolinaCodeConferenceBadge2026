@@ -436,12 +436,18 @@ func handleAdminTelemetry(s *ServerState) http.HandlerFunc {
 //
 // Badges pull updates straight from the server across four kinds of
 // content -- samples/, lib/, mods/, and tools/ -- each rooted at its own
-// directory.
-// Within a kind, every top-level entry (a sample folder, a lib package
-// folder, a lone .mpy) becomes a "unit" hashed into the manifest, and
-// BadgeHub compares that against what it last applied. Redeploying the
+// directory. Within a kind, every top-level entry (a sample folder, a lib
+// package folder, a lone .mpy) becomes a "unit" hashed into the manifest,
+// and BadgeHub compares that against what it last applied. Redeploying the
 // server with new content is what ships an update -- there is no separate
 // publish step.
+//
+// The manifest is split into two endpoints on purpose: /api/ota/manifest
+// serves hashes only (every unit, every cycle -- cheap), and /api/ota/unit
+// serves one unit's file list (only for units whose hash changed -- the
+// expensive part, paid for only when there's actually something to fetch).
+// A combined endpoint was tried first and crashed a badge outright parsing
+// ~17 KB of JSON in one call -- see handleOTAManifest.
 
 type OTAFile struct {
 	Path   string `json:"path"`
@@ -586,9 +592,48 @@ func loadOTAStore(roots map[string]string) *OTAStore {
 	return &OTAStore{roots: roots, manifest: manifest}
 }
 
+// handleOTAManifest serves hashes only, never file lists. The full manifest
+// for this repo runs ~17 KB of JSON -- fine for a browser, but that is the
+// single largest response this server sends, and on a memory-constrained
+// badge parsing it in one `r.json()` call was crashing the board outright
+// (a hard reset, not a catchable exception -- confirmed by badge telemetry
+// dead-ending right after the fetch started, followed by a fresh boot
+// sequence). A badge fetches this every cycle; it should cost nothing to
+// pull most of the time, since most of the time nothing changed.
 func handleOTAManifest(store *OTAStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, store.manifest)
+		kinds := make(map[string]map[string]string, len(store.manifest.Kinds))
+		for kind, k := range store.manifest.Kinds {
+			units := make(map[string]string, len(k.Units))
+			for name, u := range k.Units {
+				units[name] = u.Hash
+			}
+			kinds[kind] = units
+		}
+		writeJSON(w, map[string]any{"kinds": kinds})
+	}
+}
+
+// handleOTAUnit serves the file list -- the detail the summary manifest
+// deliberately omits -- for exactly one unit. A badge fetches this only for
+// units whose hash it doesn't already have, right before downloading them,
+// so the expensive payload is paid for only by what's actually changing.
+func handleOTAUnit(store *OTAStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		kind := r.URL.Query().Get("kind")
+		name := r.URL.Query().Get("name")
+
+		kindManifest, ok := store.manifest.Kinds[kind]
+		if !ok {
+			http.Error(w, "unknown kind", http.StatusNotFound)
+			return
+		}
+		unit, ok := kindManifest.Units[name]
+		if !ok {
+			http.Error(w, "unknown unit", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, unit)
 	}
 }
 
@@ -704,6 +749,7 @@ func main() {
 	mux.HandleFunc("POST /api/telemetry", handleTelemetry(state))
 	mux.HandleFunc("GET /api/admin/telemetry", handleAdminTelemetry(state))
 	mux.HandleFunc("GET /api/ota/manifest", handleOTAManifest(otaStore))
+	mux.HandleFunc("GET /api/ota/unit", handleOTAUnit(otaStore))
 	mux.HandleFunc("GET /api/ota/file", handleOTAFile(otaStore))
 	mux.HandleFunc("GET /healthz/liveness", handleLiveness)
 	mux.HandleFunc("GET /healthz/readiness", handleReadiness)

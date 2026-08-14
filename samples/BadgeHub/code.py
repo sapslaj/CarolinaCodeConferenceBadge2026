@@ -34,9 +34,10 @@ Every 60 seconds BadgeHub also asks the server for a manifest covering
 /samples/, /lib/, /mods/, and /tools/ (see server/main.go). Each top-level
 entry in those directories -- a sample folder, a lib package, a mod, a
 tool script -- is hashed on its own, so only what actually changed gets
-pulled. Anything whose hash
-differs from what's already on the badge is downloaded straight onto the
-CIRCUITPY drive, and BadgeHub reboots to pick it up.
+pulled. The manifest itself carries hashes only, no file lists -- that
+detail is fetched separately, one unit at a time, only for units whose
+hash actually differs. Anything that changed is downloaded straight onto
+the CIRCUITPY drive, and BadgeHub reboots to pick it up.
 
 Like GifPlayer's GIPHY mode, this needs write access to the badge's own
 filesystem, which CircuitPython only grants when the host computer isn't
@@ -46,6 +47,7 @@ message on the serial console -- nothing on screen changes.
 """
 
 import os
+import gc
 import time
 import math
 import json
@@ -297,6 +299,15 @@ def check_ota_updates():
     what's on the badge and pull down anything that changed. Returns True
     if at least one unit was updated.
 
+    Two fetches, deliberately. /api/ota/manifest returns hashes only, no
+    file lists -- small enough to pull every cycle even when nothing
+    changed. /api/ota/unit, which does carry a unit's file list, is only
+    fetched for units whose hash actually differs. An earlier version
+    fetched one big combined manifest (~17 KB of JSON) and reliably crashed
+    the badge parsing it -- confirmed by telemetry dead-ending mid-fetch,
+    followed by a fresh boot. Splitting the payload is the fix, not just a
+    speed-up.
+
     Sends one telemetry line per call (see send_telemetry) so this whole
     flow -- fetch, diff, write-access, apply -- can be watched from the
     admin page while the badge runs untethered with no serial console.
@@ -310,15 +321,17 @@ def check_ota_updates():
         return False
 
     kinds = manifest.get("kinds", {})
-    total_units = sum(len(k.get("units", {})) for k in kinds.values())
+    total_units = sum(len(u) for u in kinds.values())
     state = load_ota_state()
     pending = []
     for kind in OTA_KINDS:
         kind_state = state.setdefault(kind, {})
-        units = kinds.get(kind, {}).get("units", {})
-        for name, info in units.items():
-            if kind_state.get(name) != info.get("hash"):
-                pending.append((kind, name, info))
+        units = kinds.get(kind, {})
+        for name, unit_hash in units.items():
+            if kind_state.get(name) != unit_hash:
+                pending.append((kind, name))
+    manifest = None
+    gc.collect()
 
     if not pending:
         send_telemetry("ota: up to date (%d units on server)" % total_units)
@@ -326,7 +339,7 @@ def check_ota_updates():
 
     send_telemetry("ota: %d/%d unit(s) pending: %s" % (
         len(pending), total_units,
-        ", ".join("%s/%s" % (k, n) for k, n, _ in pending[:8])))
+        ", ".join("%s/%s" % (k, n) for k, n in pending[:8])))
 
     if not make_writable():
         send_telemetry("ota: filesystem read-only (USB tethered?), cannot apply")
@@ -336,8 +349,14 @@ def check_ota_updates():
     applied = []
     failed = []
     try:
-        for kind, name, info in pending:
+        for kind, name in pending:
             print("BadgeHub: OTA updating", kind, name)
+            try:
+                info = api_get("/api/ota/unit?kind=" + kind + "&name=" + name)
+            except Exception as exc:
+                print("BadgeHub: OTA unit fetch failed:", kind, name, exc)
+                failed.append("%s/%s" % (kind, name))
+                continue
             if apply_unit_update(kind, info):
                 state[kind][name] = info["hash"]
                 updated = True
@@ -345,6 +364,8 @@ def check_ota_updates():
             else:
                 print("BadgeHub: OTA update incomplete, will retry:", kind, name)
                 failed.append("%s/%s" % (kind, name))
+            info = None
+            gc.collect()
         if updated:
             save_ota_state(state)
     finally:

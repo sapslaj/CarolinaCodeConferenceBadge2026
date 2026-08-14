@@ -31,9 +31,12 @@ and `mods/` directories. Every 60 seconds (and once right after boot) it
 asks the server for `/api/ota/manifest` -- a hash of every top-level
 entry in each of those three directories, as bundled into the server's
 image -- and compares it against `/samples/.ota_state.json` on the
-badge. Anything whose hash changed gets downloaded straight onto the
-CIRCUITPY drive via `/api/ota/file`, then BadgeHub reboots
-(`supervisor.reload()`) to pick it up.
+badge. That manifest carries hashes only, no file lists, on purpose: an
+earlier version returned the full file listing for everything in one
+response (~17 KB of JSON) and reliably crashed the badge parsing it. For
+whatever changed, BadgeHub fetches that one unit's file list from
+`/api/ota/unit`, then the files themselves from `/api/ota/file`, and
+reboots (`supervisor.reload()`) to pick them up.
 
 - `samples/<Name>/...` -- every sample folder.
 - `lib/<package>/...` or `lib/<file>.mpy` -- library packages and
