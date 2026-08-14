@@ -8,8 +8,15 @@ Two sources, and the first one always works
 -------------------------------------------
   LOCAL  -- plays every .gif in /gifs/ on the badge. No WiFi, no keys,
             no writes to the filesystem. This is the default.
-  GIPHY  -- asks the GIPHY API for a random G-rated GIF matching a tag,
-            downloads the smallest rendition, and plays it.
+  GIPHY  -- asks the GIPHY API for a G-rated GIF, downloads the smallest
+            rendition, and plays it. The default tag is `trending`, which
+            fetches what is popular right now and lets SW1 walk the top
+            few; the other tags roll a random GIF each time.
+
+Nothing is bundled from GIPHY. Their API is licensed for fetching and
+displaying GIFs at runtime, which is what this does -- redistributing
+somebody's GIF by committing it to a repository is a different thing
+and not one this sample does for you.
 
 GIPHY mode has one hard requirement that has nothing to do with this
 code: **the badge has to be able to write to its own filesystem.**
@@ -93,9 +100,13 @@ GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "")
 LOCAL_DIR = "/gifs"
 CACHE_PATH = "/gifs/_giphy.gif"      # one file, rewritten every fetch
 
-# Tags SW2 cycles through. Keep them wholesome -- this screen is on
-# your chest at a conference.
-TAGS = ("cat", "dog", "robot", "space", "pixel art", "coffee")
+# Tags SW2 cycles through. "trending" is special: it asks GIPHY for
+# what is popular right now rather than for a tag, and SW1 walks the
+# top few instead of rolling a new random one. Keep the rest wholesome
+# -- this screen is on your chest at a conference.
+TRENDING = "trending"
+TRENDING_TOP = 5                      # how many of the top GIFs to cycle
+TAGS = (TRENDING, "cat", "dog", "robot", "space", "pixel art", "coffee")
 
 # GIPHY renditions, smallest sensible first. `fixed_width_small` is
 # 100 px wide which suits a 128 px screen; `preview_gif` is capped at
@@ -306,16 +317,25 @@ def connect_wifi():
     return True
 
 
-def giphy_random(tag):
-    """Ask GIPHY for one random GIF and return the best URL for us.
+def giphy_pick(tag, slot):
+    """Ask GIPHY for a GIF and return the best URL for us.
 
-    Returns (url, title) or (None, reason). Only the URL is kept out of
-    the response -- the JSON is several kilobytes and this board does
-    not have the headroom to hang onto it.
+    `trending` returns a list of what is popular right now and `slot`
+    picks one of them, so SW1 walks the top few. Every other tag uses
+    the random endpoint, where `data` is a single object instead.
+
+    Returns (url, title) or (None, reason). Only the URL and title are
+    kept out of the response -- the JSON is several kilobytes and this
+    board does not have the headroom to hang onto it.
     """
-    url = ("https://api.giphy.com/v1/gifs/random"
-           "?api_key=%s&tag=%s&rating=%s" % (GIPHY_API_KEY,
-                                             tag.replace(" ", "+"), RATING))
+    if tag == TRENDING:
+        url = ("https://api.giphy.com/v1/gifs/trending"
+               "?api_key=%s&limit=%d&rating=%s"
+               % (GIPHY_API_KEY, TRENDING_TOP, RATING))
+    else:
+        url = ("https://api.giphy.com/v1/gifs/random"
+               "?api_key=%s&tag=%s&rating=%s"
+               % (GIPHY_API_KEY, tag.replace(" ", "+"), RATING))
     try:
         r = _session.get(url, timeout=HTTP_TIMEOUT)
     except Exception as exc:
@@ -334,6 +354,8 @@ def giphy_random(tag):
     # A key that is out of quota still returns 200 with an empty object.
     if not payload:
         return None, "bad key or quota"
+    if isinstance(payload, list):     # trending gives a list, random one object
+        payload = payload[slot % len(payload)]
     images = payload.get("images", {})
     title = payload.get("title", "")
 
@@ -376,7 +398,7 @@ def download(url, path):
     return True, "%d bytes" % total
 
 
-def fetch_giphy(tag):
+def fetch_giphy(tag, slot):
     """Whole GIPHY path: key -> wifi -> writable fs -> download."""
     if not GIPHY_API_KEY:
         show_status("no API key", "set GIPHY_API_KEY", "in settings.toml",
@@ -385,8 +407,11 @@ def fetch_giphy(tag):
     if not connect_wifi():
         return None
 
-    show_status("asking giphy...", tag)
-    url, info = giphy_random(tag)
+    if tag == TRENDING:
+        show_status("asking giphy...", "trending #%d" % (slot % TRENDING_TOP + 1))
+    else:
+        show_status("asking giphy...", tag)
+    url, info = giphy_pick(tag, slot)
     if url is None:
         show_status("giphy error", info, color=0xFF6060)
         return None
@@ -508,6 +533,7 @@ sw1_prev = sw2_prev = sw3_prev = True
 
 source = "local"          # "local" or "giphy"
 tag_idx = 0
+trend_slot = 0            # which of the trending top N we are on
 local_idx = 0
 
 show_status("starting...", "")
@@ -529,8 +555,12 @@ if not local_gifs and GIPHY_API_KEY:
 while True:
     if source == "giphy":
         leds((20, 0, 30))
-        path = fetch_giphy(TAGS[tag_idx])
-        credit = "GIPHY  #%s" % TAGS[tag_idx].replace(" ", "")
+        tag = TAGS[tag_idx]
+        path = fetch_giphy(tag, trend_slot)
+        if tag == TRENDING:
+            credit = "GIPHY TRENDING %d" % (trend_slot % TRENDING_TOP + 1)
+        else:
+            credit = "GIPHY  #%s" % tag.replace(" ", "")
         if path is None:
             # Give the message time to be read, then let a button out.
             deadline = time.monotonic() + 4.0
@@ -567,6 +597,8 @@ while True:
     if action == "next":
         if source == "local":
             local_idx += 1
+        elif TAGS[tag_idx] == TRENDING:
+            trend_slot += 1       # walk the top N instead of re-rolling
     elif action == "tag":
         tag_idx = (tag_idx + 1) % len(TAGS)
         if source == "local":
