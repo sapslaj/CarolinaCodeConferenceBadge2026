@@ -1,94 +1,107 @@
 # Wa-Tor World
 
-The viewer frame from the
-[`wa-tor-whirl`](https://github.com/thomasarch/wa-tor-whirl) browser
-toy, moved onto the badge: the title, the size readout, the bordered
-world canvas and the fish/shark tally. The sidebar, the
-play/pause/restart buttons and every input box are gone — this runs the
-simulation with the page's default variables and nothing else.
-
 Wa-Tor (A.K. Dewdney, *Scientific American*, 1984) is a predator/prey
 world wrapped onto a torus. Fish wander and breed. Sharks hunt fish,
 breed more slowly, and starve if they do not eat. Neither species ever
 settles: the populations chase each other up and down for as long as
 you leave the badge on.
 
+The world uses the whole 128×160 panel at **one world cell per pixel**
+— 20 480 cells, no frame, no chrome, no controls. It began as a port
+of the viewer frame from the
+[`wa-tor-whirl`](https://github.com/thomasarch/wa-tor-whirl) browser
+toy and still runs that page's rules and colours.
+
 ## What you should see
 
-- A 50 × 50 ocean of blue cells, 100 × 100 pixels inside a 3-pixel
-  border, seeded with 500 gold fish and 125 red sharks.
-- Fish spreading into open water in blooms, sharks eating holes through
-  the blooms behind them, and the tally at the bottom swinging with it —
-  a fish boom, then a shark boom, then a crash, over and over.
-- No buttons do anything. The world reseeds itself when it ends
-  (everything dead, the grid full, or one species gone for 60 turns),
-  since there is no Restart button to press.
+- A blue ocean filling the screen, with gold fish and red sharks a
+  single pixel each — a few hundred of them most of the time.
+- Fish drifting apart and budding new fish, sharks cutting through the
+  loose shoals, and the whole thing breathing: long thin stretches,
+  then a bloom of a few thousand, then a crash.
+- A fresh world whenever one side finally loses — only sharks left,
+  only fish left, or open ocean. There is no Restart button to press,
+  so it reseeds itself.
+- Population counts on the USB serial console every 50 turns (the
+  world owns every pixel, so there is nowhere on screen to put them).
 
 ## Controls
 
-None. The viewer runs by itself.
+None. The world runs by itself.
 
-## The defaults, straight from the page
+## The parameters, and why they are not the page's
 
-| Variable | Value |
-|----------|-------|
-| world | 50 × 50 (500 px canvas ÷ 10 px `pixelSize`) |
-| `playSpeed` | 100 ms per turn |
-| `startingFish` / `startFishChi` / `fishFertRate` / `fishWeight` | 500 / 5 / 2 / 1 |
-| `startingSharks` / `startSharkChi` / `sharkFertRate` | 125 / 4 / 8 |
+| | this badge | the page |
+|---|---|---|
+| world | 128 × 160 = 20 480 cells | 50 × 50 = 2 500 |
+| turn | 200 ms | 100 ms |
+| fish | 400 start, energy 62, breeds every 30 moves | 500, energy 5, every 2 |
+| sharks | 100 start, energy 16, breeds every 20 moves | 125, energy 4, every 8 |
+| a meal is worth | 30 energy | 1 |
 
-The rules are the page's rules, quirks included: **every** creature
-spends one energy per move, so fish starve as well as sharks, and a
-creature boxed in on all four sides simply passes — it neither ages nor
-breeds that turn.
+The page's biology settles at roughly **half a full grid**, which on
+20 480 cells would be ~11 000 creatures every turn — more than this
+hardware wants to move. Getting a thinly populated ocean instead comes
+down to one number.
+
+A shark spends 1 energy per move and finds a fish on about
+`4 × (fish density)` of its moves, so it breaks even only where
+`4 × density × meal ≥ 1`. With the page's meal of 1 that needs a 25%
+fish density — which is exactly why the page's world is so crowded.
+Raise a meal to 30 and sharks can live below 1% density. Slowing fish
+breeding from every 2 moves to every 30 then stops the fish from
+simply filling the space that leaves.
+
+Measured over 6 worlds × 6 000 turns (20 minutes of badge time each):
+
+| | |
+|---|---|
+| median population | 690 (3.4% of the grid) |
+| usual range | 240 – 1 750 (10th–90th percentile) |
+| boom peak | 9 250 (45% of the grid) |
+| worlds surviving 20 min | 5 of 6 |
+
+Pushing the average below ~500 is possible but costs stability — the
+settings that averaged 500 survived 1 run in 4 instead of 5 in 6.
+
+The rules themselves are the page's, quirks included: **every**
+creature spends one energy per move, so fish starve as well as sharks,
+and a creature boxed in on all four sides simply passes — it neither
+ages nor breeds that turn.
 
 ## Code design
 
 - **The world *is* the state.** The browser version keeps a list of
   creature objects and reads the grid back out of the canvas with
   `getImageData`; neither survives contact with a microcontroller —
-  2500 objects would eat the heap and the per-creature `findIndex`
-  scans are quadratic. Here `cells` is one flat list of 2500 small
-  ints, and "what is in the cell to my left" is a single index.
-- **One creature = one int.** Type in bits 0–1, fertility in 2–6,
-  energy in 7–14, and a stamp bit at 15. CircuitPython stores small
-  ints inline in a list, so a full world costs one list of 2500 slots
-  instead of 2500 heap objects.
+  20 480 objects would eat the heap many times over and the
+  per-creature `findIndex` scans are quadratic.
+- **One creature = one 16-bit word**, in an `array("H")`: type in bits
+  0–1, fertility in 2–6, energy in 7–14, and a stamp bit at 15. That
+  is 40 KB; the same thing as a list of Python ints would be 80 KB,
+  which is the difference between fitting on this board and not.
 - **The stamp bit flips meaning every turn.** A creature that moves
-  into a cell the tick has not reached yet would otherwise move twice.
-  Marking it costs one bit, and flipping what "marked" means each tick
+  into a cell the turn has not reached yet would otherwise move twice.
+  Marking it costs one bit, and flipping what "marked" means each turn
   saves a second pass over the grid to clear the marks.
-- **Torus arithmetic on flat indices** — `idx - COLS if idx >= COLS else
-  idx + LAST_ROW` and friends, so a fish leaving the top edge swims in
-  at the bottom with no coordinate wrapping in sight. Only the column
-  has to be worked out at all; the row edges are just the ends of the
-  index.
-- **The bitmap is 50×50, not 100×100.** One pixel per cell, blown up by
-  a `displayio.Group(scale=2)` — displayio does the zoom in C, so
-  drawing a creature is a single `bmp[idx]` store instead of a 2×2
-  `fill_region` call. The bitmap shares the simulation's flat index, so
-  nothing converts between an index and (x, y) to draw.
-- **The turn carries its own work list.** Every creature that survives
-  appends where it ended up, so the next turn starts from a list of
-  occupied cells instead of rescanning all 2500. Entries do go stale
-  when a shark eats a fish that had already moved — the stamp check was
-  catching that anyway.
-- **Fish get the unrolled path.** They outnumber sharks about 10:1 and
-  only ever look for open water, so their neighbour scan is four
-  straight-line tests with no loop, no tuple and no "is that prey?"
-  check. Sharks, being rare, keep the readable loop.
-- **Only changed cells are repainted**, and populations are tracked
-  incrementally as creatures are born, eaten and starved rather than
-  recounted each turn.
+- **One cell, one pixel, one index.** `cells` and the bitmap share the
+  same flat index, so drawing a creature is a single `bmp[idx]` store
+  — no index-to-(x, y) conversion and no scaling.
+- **Torus arithmetic on flat indices** — only the column has to be
+  worked out, because the row edges are just the ends of the index.
+- **The turn carries its own work list**, so the next turn starts from
+  a list of occupied cells instead of rescanning all 20 480. Entries
+  go stale when a shark eats a fish that had already moved; the stamp
+  check catches that.
+- **Fish get the unrolled path.** They outnumber sharks and only ever
+  look for open water, so their neighbour scan is four straight-line
+  tests with no loop, no tuple and no "is that prey?" check.
+- **Only changed cells are repainted**, and a newborn wears its
+  parent's colour, so breeding does not even cost a pixel store.
+  Populations are tracked incrementally as creatures are born, eaten
+  and starved rather than recounted each turn.
 
-Together those take a creature's turn to roughly half the Python-level
-work of the straightforward version. At the top of a fish bloom the
-world still holds ~1800 creatures and a turn costs more than the page's
-100 ms budget on this hardware — the loop holds 100 ms per turn when it
-has slack and free-runs when it does not, so a busy world just runs a
-little slower than a sparse one.
-
-Turn order is arbitrary in every version of this — the page pops its
-creature list, this pops its work list — and it does move the numbers:
-taking turns in strict grid order rather than work-list order settles
-the world about 9% denser. The rules are the same either way.
+At a typical few hundred creatures the simulation costs far less than
+pushing the frame out over SPI, so the viewer is limited by the panel
+rather than by Python. If you want it faster, raising the display
+`baudrate` above `8_000_000` buys more than anything left in the loop.

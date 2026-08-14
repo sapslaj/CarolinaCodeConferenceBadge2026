@@ -1,73 +1,89 @@
 """
-code.py -- Wa-Tor World viewer for the Carolina Code Conference 2026 badge.
-==========================================================================
-A port of the viewer frame from the `wa-tor-whirl` browser toy: the
-world canvas, its border, the size readout and the fish/shark tally.
-The sidebar, the play/pause/restart buttons and every input box are
-gone -- this runs the simulation with the page's default variables and
-nothing else.
-
+code.py -- Wa-Tor World for the Carolina Code Conference 2026 badge.
+====================================================================
 Wa-Tor (A.K. Dewdney, 1984) is a predator/prey world on a torus. Fish
 wander and breed; sharks hunt fish, breed more slowly, and starve if
-they do not eat. Populations chase each other up and down forever.
+they do not eat. Neither species ever settles -- the populations chase
+each other up and down for as long as the badge is on.
 
-The defaults, straight from the page
-------------------------------------
-    world       50 x 50   (500px canvas / 10px cells)
-    speed       100 ms per turn
-    fish        500 start, energy 5, fertility 2, weight 1
-    sharks      125 start, energy 4, fertility 8
+This started as a port of the viewer frame from the `wa-tor-whirl`
+browser toy and kept its rules, its colours and its habit of running
+with no controls at all. The frame itself is gone: the world now uses
+the whole 128x160 panel, one world cell per pixel, so what you see is
+the grid itself at full resolution rather than a canvas inside a
+border.
 
 The rules are the page's rules, quirks included: *every* creature
 spends one energy per move, so fish starve too, and a creature that is
 boxed in on all four sides simply passes -- it neither ages nor breeds
 that turn.
 
+Why the numbers are not the page's
+----------------------------------
+The page runs 500 fish and 125 sharks on a 50x50 canvas and settles at
+roughly half a full grid. Scaled to 20480 cells that would be ~11000
+creatures a turn, which is more than this hardware wants to move, so
+the biology here is retuned for a thinly populated ocean:
+
+    world       128 x 160  (20480 cells, one per pixel)
+    speed       200 ms per turn
+    fish        400 start, energy 62, breeds every 30 moves
+    sharks      100 start, energy 16, breeds every 20 moves, meal = 30
+
+The lever that sets how crowded the world gets is what a meal is
+worth. A shark spends 1 energy a move and meets a fish on about
+4 * (fish density) of its moves, so it only breaks even where
+4 * density * meal >= 1: with the page's meal of 1 that needs a 25%
+fish density, and with a meal of 30 it needs under 1%. Slowing fish
+breeding down from every 2 moves to every 30 keeps them from simply
+filling the empty space that leaves.
+
+The result averages about 1000 creatures, but it is Wa-Tor, so it
+booms and crashes -- expect anything from a few dozen to a few
+thousand, and a fresh world when one species finally loses.
+
 Controls
 --------
-None. The viewer runs by itself. Because there is no Restart button to
-press, the world reseeds on its own when it ends: everything dead, the
-grid completely full, or one species gone long enough that nothing
-interesting is left to watch.
+None. The world runs by itself and reseeds when it is over: only
+sharks left, only fish left, or open ocean.
 
 How this is fast enough
 -----------------------
 The browser version keeps a list of creature objects and reads the
 world back out of the canvas with `getImageData`. Neither idea
-survives contact with a microcontroller: 2500 dict-ish objects would
-eat the heap, and per-creature `findIndex` scans are quadratic.
+survives contact with a microcontroller: 20480 dict-ish objects would
+eat the heap many times over, and per-creature `findIndex` scans are
+quadratic.
 
-So the world *is* the state here. `cells` is one flat list of 2500
-small integers, and each creature is packed into a single int:
+So the world *is* the state here. `cells` is one flat array of 20480
+16-bit words, and each creature is packed into a single word:
 
     bit 0-1   type   1 = fish, 2 = shark   (0 = open ocean)
-    bit 2-6   fert   turns since it last bred
-    bit 7-14  chi    energy left
+    bit 2-6   fert   turns since it last bred   (0-31)
+    bit 7-14  chi    energy left                (0-255)
     bit 15    stamp  "already took its turn this tick"
 
-Small ints live inline in the list, so a full world costs one list of
-2500 slots rather than 2500 objects, and looking up "what is in the
-cell to my left" is one index. The stamp bit flips its meaning every
-tick, which saves walking the grid to clear it: a creature that moves
-into a cell that has not been visited yet this tick is skipped rather
-than moving twice.
+That is 40 KB as an `array("H")` and would be 80 KB as a list of
+Python ints, which is the difference between fitting on this board and
+not. The stamp bit flips its meaning every tick, which saves walking
+the grid to clear it: a creature that moves into a cell the tick has
+not reached yet is skipped rather than moving twice.
 
-Four more things keep the tick cheap, because at the top of a fish
-bloom it runs ~1800 times:
+Three more things keep the tick cheap:
 
-  * The cell bitmap is 50x50 -- one pixel per cell -- and a Group with
-    `scale=2` blows it up to the 100x100 the frame wants. displayio
-    does the zoom in C, so drawing a creature is a single `bmp[idx]`
-    store rather than a 2x2 `fill_region` call.
-  * `cells` and the bitmap use the *same* flat index, so nothing has to
-    convert between an index and (x, y) to draw.
+  * `cells` and the bitmap use the *same* flat index, so drawing a
+    creature is one `bmp[idx]` store -- no index-to-(x, y) conversion,
+    and at one cell per pixel no scaling either.
   * The tick carries its own work list: every creature that survives
     appends where it ended up, so the next tick starts from a list of
-    occupied cells instead of rescanning all 2500. Entries can go stale
-    (eaten fish), which the stamp check already catches.
-  * Fish outnumber sharks roughly 10:1 and only ever look for open
-    water, so their neighbour scan is unrolled and skips the "is that
-    prey?" test entirely.
+    occupied cells instead of rescanning all 20480. Entries can go
+    stale (eaten fish), which the stamp check already catches.
+  * Fish outnumber sharks and only ever look for open water, so their
+    neighbour scan is unrolled and skips the "is that prey?" test.
+
+At a typical thousand creatures the turn costs far less than pushing
+the frame out over SPI, so the viewer is limited by the panel rather
+than by Python.
 """
 
 # --- backlight off FIRST, before the slow adafruit imports ---------
@@ -84,45 +100,33 @@ import random
 import busio
 import displayio
 import fourwire
-import terminalio
 import neopixel
 import adafruit_st7735r
-from adafruit_display_text import label
-
-# `bitmaptools` is a built-in module on the ESP32-S3 CircuitPython
-# build; it paints the backdrop once at startup. The pure-Python
-# fallback keeps the sample running on a build without it rather than
-# crashing on import -- the simulation itself never calls it.
-try:
-    from bitmaptools import fill_region
-except ImportError:
-    def fill_region(bmp, x1, y1, x2, y2, value):
-        for _y in range(y1, y2):
-            for _x in range(x1, x2):
-                bmp[_x, _y] = value
+from array import array
 
 
 # ==================================================================
-# The page's default variables, unchanged.
+# The world's parameters. See the module docstring for why these are
+# not the page's -- the short version is that a meal worth 30 is what
+# lets sharks live in a thinly populated ocean.
 # ==================================================================
-COLS = 50                    # 500px canvas / 10px pixelSize
-ROWS = 50
-PLAY_SPEED = 0.1             # playSpeed, 100 ms
+COLS = 128                   # one cell per pixel, the whole panel
+ROWS = 160
+PLAY_SPEED = 0.2             # seconds per turn
 
-STARTING_FISH = 500
-START_FISH_CHI = 5
-FISH_FERT_RATE = 2
-FISH_WEIGHT = 1
+STARTING_FISH = 400
+START_FISH_CHI = 62          # moves a fish lives without breeding
+FISH_FERT_RATE = 30          # moves between calves  (max 31, 5 bits)
+FISH_WEIGHT = 30             # energy a shark gains from a meal
 
-STARTING_SHARKS = 125
-START_SHARK_CHI = 4
-SHARK_FERT_RATE = 8
+STARTING_SHARKS = 100
+START_SHARK_CHI = 16         # moves a shark lives between meals
+SHARK_FERT_RATE = 20         # moves between pups    (max 31, 5 bits)
 
 OCEAN = 0                    # also the empty-cell marker
 FISH = 1
 SHARK = 2
 
-CELL = 2                     # display zoom: 50x50 cells -> 100x100 px
 CELL_COUNT = COLS * ROWS
 COLS_1 = COLS - 1
 LAST_ROW = CELL_COUNT - COLS
@@ -137,48 +141,19 @@ VALUE_MASK = STAMP_BIT - 1
 FISH_BABY = FISH | (START_FISH_CHI << CHI_SHIFT)
 SHARK_BABY = SHARK | (START_SHARK_CHI << CHI_SHIFT)
 
-# There is no Restart button, so the viewer restarts itself.
-EXTINCT_GRACE = 60           # ticks a lone species is allowed to coast
-
-
-# ==================================================================
-# Layout -- the viewer frame, on a 128x160 portrait panel.
-#
-#   WA-TOR              title
-#   WORLD  50 x 50      size readout
-#   +----------------+  3px border, the page's .world-wrap
-#   |   100 x 100    |  the canvas
-#   +----------------+
-#   fish 500  sharks 125
-# ==================================================================
-GRID_W = COLS * CELL
-GRID_H = ROWS * CELL
-GRID_X = (128 - GRID_W) // 2         # 14
-GRID_Y = 39
-BORDER = 3
-FRAME_X0 = GRID_X - BORDER
-FRAME_Y0 = GRID_Y - BORDER
-FRAME_X1 = GRID_X + GRID_W + BORDER
-FRAME_Y1 = GRID_Y + GRID_H + BORDER
-
-# Colours lifted from the stylesheet / convertColor().
+# Colours lifted from the page's convertColor().
 C_OCEAN = 0x0F41C8                   # rgba(15,65,200)
 C_FISH = 0xE7CB6F                    # rgba(231,203,111)
 C_SHARK = 0xB61919                   # rgba(182,25,25)
-C_TEXT = 0xC8DCFA                    # rgba(200,220,250)
-C_FISH_TEXT = 0xE7CB6F
-C_SHARK_TEXT = 0xE05A5A              # the shark red, lifted to stay legible
-C_FRAME = 0x29336A                   # .world-wrap border over the backdrop
-BG_TOP = (5, 5, 65)                  # body gradient, rgba(5,5,65)
-BG_BOTTOM = (35, 65, 110)            # ...to rgba(35,65,110)
-BG_STEPS = 8
+
+REPORT_EVERY = 50            # turns between population lines on serial
 
 
 # ==================================================================
 # Hardware
 # ==================================================================
-# The viewer has no LED display of its own; blank whatever the
-# previous sample left lit.
+# The world has no LED display of its own; blank whatever the previous
+# sample left lit.
 pixels = neopixel.NeoPixel(board.IO4, 5, brightness=0.2, auto_write=False)
 pixels.fill((0, 0, 0))
 pixels.show()
@@ -208,69 +183,26 @@ display = adafruit_st7735r.ST7735R(
 
 
 # ==================================================================
-# Scene
+# Scene -- one bitmap, one pixel per cell, filling the panel.
 # ==================================================================
-scene = displayio.Group()
+palette = displayio.Palette(3)
+palette[OCEAN] = C_OCEAN
+palette[FISH] = C_FISH
+palette[SHARK] = C_SHARK
 
-# Backdrop: the page's diagonal body gradient, flattened to a vertical
-# ramp in BG_STEPS bands, plus one more entry for the canvas border.
-bg_pal = displayio.Palette(BG_STEPS + 1)
-for i in range(BG_STEPS):
-    f = i / (BG_STEPS - 1)
-    r = int(BG_TOP[0] + (BG_BOTTOM[0] - BG_TOP[0]) * f)
-    g = int(BG_TOP[1] + (BG_BOTTOM[1] - BG_TOP[1]) * f)
-    b = int(BG_TOP[2] + (BG_BOTTOM[2] - BG_TOP[2]) * f)
-    bg_pal[i] = (r << 16) | (g << 8) | b
-bg_pal[BG_STEPS] = C_FRAME
-
-bg_bmp = displayio.Bitmap(128, 160, BG_STEPS + 1)
-band = 160 // BG_STEPS
-for i in range(BG_STEPS):
-    fill_region(bg_bmp, 0, i * band, 128, (i + 1) * band, i)
-# The border is drawn solid; the grid sits on top and covers the middle.
-fill_region(bg_bmp, FRAME_X0, FRAME_Y0, FRAME_X1, FRAME_Y1, BG_STEPS)
-scene.append(displayio.TileGrid(bg_bmp, pixel_shader=bg_pal))
-
-# One bitmap pixel per world cell, zoomed by the group. Keeping the
-# bitmap at world resolution means a cell is one store, and its flat
-# index is the same index the simulation already has in hand.
-grid_pal = displayio.Palette(3)
-grid_pal[OCEAN] = C_OCEAN
-grid_pal[FISH] = C_FISH
-grid_pal[SHARK] = C_SHARK
 grid_bmp = displayio.Bitmap(COLS, ROWS, 3)
-grid_group = displayio.Group(scale=CELL, x=GRID_X, y=GRID_Y)
-grid_group.append(displayio.TileGrid(grid_bmp, pixel_shader=grid_pal))
-scene.append(grid_group)
-
-title_lbl = label.Label(terminalio.FONT, text="WA-TOR", scale=2, color=C_TEXT)
-title_lbl.anchor_point = (0.5, 0.5)
-title_lbl.anchored_position = (64, 12)
-scene.append(title_lbl)
-
-size_lbl = label.Label(terminalio.FONT, color=C_TEXT,
-                       text="WORLD  %d x %d" % (COLS, ROWS))
-size_lbl.anchor_point = (0.5, 0.5)
-size_lbl.anchored_position = (64, 28)
-scene.append(size_lbl)
-
-fish_lbl = label.Label(terminalio.FONT, text="", color=C_FISH_TEXT)
-fish_lbl.anchor_point = (0.0, 0.5)
-fish_lbl.anchored_position = (4, 151)
-scene.append(fish_lbl)
-
-shark_lbl = label.Label(terminalio.FONT, text="", color=C_SHARK_TEXT)
-shark_lbl.anchor_point = (1.0, 0.5)
-shark_lbl.anchored_position = (124, 151)
-scene.append(shark_lbl)
-
+scene = displayio.Group()
+scene.append(displayio.TileGrid(grid_bmp, pixel_shader=palette))
 display.root_group = scene
 
 
 # ==================================================================
 # The world
 # ==================================================================
-cells = [0] * CELL_COUNT
+# 16-bit words, one per cell. Built from a zero-filled bytes object so
+# it never has to exist as a 20480-element Python list.
+cells = array("H", bytes(2 * CELL_COUNT))
+
 queue = []                   # where the creatures are, from last tick
 mv = [0, 0, 0, 0]            # scratch: open neighbours
 pv = [0, 0, 0, 0]            # scratch: neighbouring fish (sharks only)
@@ -317,15 +249,15 @@ def populate():
 def step():
     """One turn of the world -- popList() from the page, in one pass.
 
-    Every creature standing at the start of the tick gets a move: eat
+    Every creature standing at the start of the turn gets a move: eat
     if it can, breed if it is ready, otherwise wander. Cells are
     repainted as they change, so nothing redraws the whole grid.
     """
     global stamp, fish_pop, shark_pop, queue
 
     # Local aliases: in CircuitPython a global or attribute lookup
-    # costs noticeably more than a local, and this loop runs about
-    # 1800 times a tick at the top of a bloom.
+    # costs noticeably more than a local, and this loop runs once per
+    # creature per turn.
     cells_ = cells
     bmp = grid_bmp
     rnd = random.randrange
@@ -373,7 +305,7 @@ def step():
         nopen = 0
         nprey = 0
         if ctype == SHARK:
-            # Sharks are the rare case (~1 in 10), so readability wins.
+            # Sharks are the rare case, so readability wins.
             for n in (lf, rt, dn, up):
                 t = cells_[n]
                 if not t:
@@ -430,11 +362,13 @@ def step():
                 chi = 255
             fish -= 1
 
-        # Vacate: ocean, or the newborn. `baby & 3` is its palette index.
+        # Vacate the cell. A newborn wears its parent's colour, so the
+        # pixel is already right and only an empty cell needs redrawing.
         cells_[idx] = baby
-        bmp[idx] = baby & 3
         if baby:
             keep(idx)
+        else:
+            bmp[idx] = OCEAN
 
         fert += 1
         chi -= 1
@@ -457,14 +391,10 @@ except AttributeError:
     pass
 
 populate()
-fish_lbl.text = "fish %d" % fish_pop
-shark_lbl.text = "sharks %d" % shark_pop
 display.refresh()
 bl.value = True
 
-shown_fish = fish_pop
-shown_sharks = shark_pop
-lonely = 0
+turn = 0
 print("WaTor: %dx%d world, %d fish, %d sharks"
       % (COLS, ROWS, fish_pop, shark_pop))
 
@@ -472,47 +402,37 @@ while True:
     started = time.monotonic()
 
     step()
-
-    if fish_pop != shown_fish:
-        shown_fish = fish_pop
-        fish_lbl.text = "fish %d" % fish_pop
-    if shark_pop != shown_sharks:
-        shown_sharks = shark_pop
-        shark_lbl.text = "sharks %d" % shark_pop
     display.refresh()
 
-    # The page stops when the world empties or fills; with no Restart
-    # button, start a fresh world instead. A world down to one species
-    # is given a little rope first -- fish alone just grow to the edges.
-    total = fish_pop + shark_pop
-    if fish_pop == 0 or shark_pop == 0:
-        lonely += 1
-    else:
-        lonely = 0
+    turn += 1
+    if turn % REPORT_EVERY == 0:
+        # No room for a tally on screen any more -- the world owns
+        # every pixel -- so the populations go to the serial console.
+        print("WaTor: turn %d  fish %d  sharks %d" % (turn, fish_pop, shark_pop))
 
-    if total == 0:
-        why = "extinct"
-    elif total >= CELL_COUNT:
+    # The page stops when the world empties or fills; with no Restart
+    # button, start a fresh world instead. It takes both species to
+    # make a Wa-Tor world worth watching, so the moment one of them is
+    # gone -- all sharks, all fish, or open ocean -- this one is over.
+    if fish_pop == 0:
+        why = "ocean" if shark_pop == 0 else "sharks only"
+    elif shark_pop == 0:
+        why = "fish only"
+    elif fish_pop + shark_pop >= CELL_COUNT:
         why = "world full"
-    elif lonely >= EXTINCT_GRACE:
-        why = "one species left"
     else:
         why = None
 
     if why:
-        print("WaTor: %s -- reseeding" % why)
+        print("WaTor: %s after %d turns -- reseeding" % (why, turn))
         time.sleep(0.5)
         populate()
-        shown_fish = fish_pop
-        shown_sharks = shark_pop
-        fish_lbl.text = "fish %d" % fish_pop
-        shark_lbl.text = "sharks %d" % shark_pop
-        lonely = 0
+        turn = 0
         display.refresh()
         continue
 
-    # Hold the page's 100 ms turn when there is slack; a busy world
-    # simply runs as fast as the badge can draw it.
+    # Hold the turn length when there is slack; a crowded world simply
+    # runs as fast as the badge can draw it.
     slack = PLAY_SPEED - (time.monotonic() - started)
     if slack > 0:
         time.sleep(slack)
