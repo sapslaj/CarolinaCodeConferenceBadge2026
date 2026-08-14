@@ -11,6 +11,9 @@ boot_out.txt
 __pycache__/
 *.py[cod]
 
+# JetBrains IDE settings.
+.idea/
+
 # Editor / OS scratch files that end up on the CIRCUITPY drive.
 *.tmp
 *.swp
