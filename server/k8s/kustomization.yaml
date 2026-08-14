@@ -13,4 +13,4 @@ resources:
 images:
 - name: oci.sapslaj.xyz/badge-hub
   newName: oci.sapslaj.xyz/badge-hub
-  newTag: 5885e3b
+  newTag: eebd8ef

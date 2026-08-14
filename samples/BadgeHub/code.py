@@ -168,13 +168,18 @@ def api_post(path, body):
 
 
 def send_telemetry(message):
-    """Log a message to the server, tagged with this badge's id and name.
+    """Log a message to the server, tagged with this badge's id and name --
+    and always to the badge's own serial console too, via the regular
+    print()-based logging every other function here uses.
 
     A debug backchannel for exactly the situation this badge is usually
-    in when something is wrong: on battery, no serial console, and the
-    display already busy showing something else. Best-effort -- a failed
-    telemetry send must never be the thing that takes the badge down.
+    in when something is wrong: on battery, no serial console readily
+    available, and the display already busy showing something else. The
+    print() is what's left when the server can't be reached at all, which
+    is itself useful information -- best-effort, since a failed telemetry
+    send must never be the thing that takes the badge down.
     """
+    print("BadgeHub:", message)
     if not wifi.radio.ipv4_address:
         return
     try:
@@ -290,6 +295,7 @@ def check_ota_updates():
     flow -- fetch, diff, write-access, apply -- can be watched from the
     admin page while the badge runs untethered with no serial console.
     """
+    send_telemetry("starting OTA check")
     try:
         manifest = api_get("/api/ota/manifest")
     except Exception as exc:
@@ -590,6 +596,7 @@ if wifi.radio.ipv4_address:
         api_post("/api/mood", {"id": get_badge_id(), "mood": MOODS[mood_idx][0]})
         status_lbl.text = "connected!"
         status_lbl.color = 0x00FF00
+        send_telemetry("initial checkin succeeded")
     except Exception as e:
         status_lbl.text = "server fail"
         status_lbl.color = 0xFF8800
@@ -601,6 +608,7 @@ if wifi.radio.ipv4_address:
     try:
         current_state = api_get("/api/state?id=" + get_badge_id())
         update_display(current_state)
+        send_telemetry("initial state update succeeded")
     except Exception as e:
         print("State fetch error:", e)
 
