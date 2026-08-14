@@ -27,6 +27,20 @@ Controls
 
 The badge checks in with the server on boot, then polls /api/state every
 5 seconds for updates (broadcasts, light commands, poll changes, room mood).
+
+OTA sample updates
+-------------------
+Every 60 seconds BadgeHub also asks the server for a manifest of every
+sample under /samples/ on the server (see server/main.go). If a sample's
+content hash differs from what is already on the badge, BadgeHub downloads
+the changed files straight onto the CIRCUITPY drive and reboots to pick
+them up.
+
+Like GifPlayer's GIPHY mode, this needs write access to the badge's own
+filesystem, which CircuitPython only grants when the host computer isn't
+holding it (i.e. running on battery, or with CIRCUITPY unmounted/ejected).
+Plugged into a computer for development, updates are simply skipped with a
+message on the serial console -- nothing on screen changes.
 """
 
 import os
@@ -43,6 +57,8 @@ import terminalio
 import wifi
 import socketpool
 import ssl
+import storage
+import supervisor
 import adafruit_requests
 import adafruit_st7735r
 from adafruit_display_text import label
@@ -58,6 +74,10 @@ WIFI_PASSWORD = os.getenv("WIFI_PASSWORD", "your-wifi-password")
 SERVER_URL = "https://badge.sapslaj.cloud"
 
 MY_NAME = os.getenv("FIRST_NAME", "YOUR") + " " + os.getenv("LAST_NAME", "NAME")
+
+OTA_DIR = "/samples"
+OTA_STATE_PATH = "/samples/.ota_state.json"
+OTA_CHECK_INTERVAL = 60.0
 # ==============================================================
 
 
@@ -138,6 +158,136 @@ def api_post(path, body):
     finally:
         r.close()
     return data
+
+
+# ------------------------------------------------------------------
+# OTA sample updates
+# ------------------------------------------------------------------
+def make_writable():
+    """Try to get write access to the badge's own filesystem.
+
+    Same tradeoff GifPlayer's GIPHY mode makes: CircuitPython hands write
+    access to exactly one of the badge and the host computer, so this
+    fails (harmlessly) whenever a computer has CIRCUITPY mounted.
+    """
+    try:
+        storage.remount("/", readonly=False)
+        return True
+    except Exception as exc:
+        print("BadgeHub: filesystem is read-only, skipping OTA update:", exc)
+        return False
+
+
+def make_readonly():
+    try:
+        storage.remount("/", readonly=True)
+    except Exception:
+        pass
+
+
+def ensure_dir(path):
+    try:
+        os.mkdir(path)
+    except OSError:
+        pass  # already there, or not writable
+
+
+def ensure_dirs_for(file_path):
+    """Create every directory component of a file path that is missing.
+    Samples are mostly flat, but GifPlayer ships a tools/ subfolder."""
+    parts = file_path.split("/")[:-1]
+    cur = ""
+    for part in parts:
+        if not part:
+            continue
+        cur += "/" + part
+        ensure_dir(cur)
+
+
+def load_ota_state():
+    try:
+        with open(OTA_STATE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_ota_state(state):
+    try:
+        with open(OTA_STATE_PATH, "w") as f:
+            json.dump(state, f)
+    except Exception as exc:
+        print("BadgeHub: could not save OTA state:", exc)
+
+
+def ota_download_file(sample, rel_path, dest_path):
+    url = SERVER_URL + "/api/ota/file?sample=" + sample + "&path=" + rel_path
+    r = http().get(url)
+    try:
+        if r.status_code != 200:
+            print("BadgeHub: OTA fetch failed:", sample, rel_path, r.status_code)
+            return False
+        ensure_dirs_for(dest_path)
+        with open(dest_path, "wb") as f:
+            for chunk in r.iter_content(1024):
+                f.write(chunk)
+        return True
+    except Exception as exc:
+        print("BadgeHub: OTA write failed:", sample, rel_path, exc)
+        return False
+    finally:
+        r.close()
+
+
+def apply_sample_update(name, info):
+    """Download every file listed for sample `name`. Only succeeds (and
+    is only recorded as applied) if every file lands cleanly -- a
+    half-written sample is worse than a stale one."""
+    ensure_dir(OTA_DIR + "/" + name)
+    for f in info["files"]:
+        dest = OTA_DIR + "/" + name + "/" + f["path"]
+        if not ota_download_file(name, f["path"], dest):
+            return False
+    return True
+
+
+def check_ota_updates():
+    """Compare the server's sample manifest against what's on the badge
+    and pull down anything that changed. Returns True if at least one
+    sample was updated."""
+    try:
+        manifest = api_get("/api/ota/manifest")
+    except Exception as exc:
+        print("BadgeHub: OTA manifest fetch failed:", exc)
+        return False
+
+    state = load_ota_state()
+    pending = []
+    for name, info in manifest.get("samples", {}).items():
+        if state.get(name) != info.get("hash"):
+            pending.append((name, info))
+
+    if not pending:
+        return False
+
+    if not make_writable():
+        return False
+
+    updated = False
+    try:
+        for name, info in pending:
+            print("BadgeHub: OTA updating sample:", name)
+            if apply_sample_update(name, info):
+                state[name] = info["hash"]
+                updated = True
+            else:
+                print("BadgeHub: OTA update incomplete, will retry:", name)
+        if updated:
+            save_ota_state(state)
+    finally:
+        make_readonly()
+
+    return updated
 
 
 # ------------------------------------------------------------------
@@ -399,7 +549,24 @@ if wifi.radio.ipv4_address:
     except Exception as e:
         print("State fetch error:", e)
 
+# Check for OTA sample updates right away, so a badge that boots with a
+# stale sample on disk gets fixed before anyone picks it from the menu.
+if wifi.radio.ipv4_address:
+    status_lbl.text = "checking updates..."
+    display.refresh()
+    try:
+        if check_ota_updates():
+            status_lbl.text = "updated! restarting"
+            status_lbl.color = 0x00FF00
+            display.refresh()
+            time.sleep(2)
+            supervisor.reload()
+    except Exception as e:
+        print("BadgeHub: OTA check failed:", e)
+    update_display(current_state)
+
 last_state_fetch = time.monotonic()
+last_ota_check = time.monotonic()
 
 # Main loop
 sw1_prev = True; sw2_prev = True; sw3_prev = True
@@ -467,6 +634,19 @@ while True:
         except Exception as e:
             print("State fetch error:", e)
         last_state_fetch = now
+
+    # Check for OTA sample updates periodically
+    if wifi.radio.ipv4_address and (now - last_ota_check) > OTA_CHECK_INTERVAL:
+        last_ota_check = now
+        try:
+            if check_ota_updates():
+                status_lbl.text = "updated! restarting"
+                status_lbl.color = 0x00FF00
+                display.refresh()
+                time.sleep(2)
+                supervisor.reload()
+        except Exception as e:
+            print("BadgeHub: OTA check failed:", e)
 
     # Render lights
     lights = current_state["lights"]

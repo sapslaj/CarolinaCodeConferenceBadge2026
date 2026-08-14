@@ -1,11 +1,18 @@
 package main
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -344,6 +351,146 @@ func handleAdminBadges(s *ServerState) http.HandlerFunc {
 	}
 }
 
+// ---- OTA ----
+//
+// Badges pull sample updates straight from the server: each sample folder
+// under SAMPLES_DIR gets hashed into a manifest, and BadgeHub compares that
+// against what it last applied. Redeploying the server with new sample code
+// is what ships an update -- there is no separate publish step.
+
+type OTAFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
+type OTASample struct {
+	Hash  string    `json:"hash"`
+	Files []OTAFile `json:"files"`
+}
+
+type OTAManifest struct {
+	Samples map[string]OTASample `json:"samples"`
+}
+
+type OTAStore struct {
+	dir      string
+	manifest OTAManifest
+}
+
+func collectSampleFiles(root string) ([]OTAFile, error) {
+	var files []OTAFile
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		files = append(files, OTAFile{
+			Path:   rel,
+			SHA256: hex.EncodeToString(sum[:]),
+			Size:   int64(len(data)),
+		})
+		return nil
+	})
+	return files, err
+}
+
+// loadOTAStore hashes every sample folder under dir once at startup. A
+// missing or empty directory is not fatal -- OTA is simply unavailable and
+// the rest of the badge server keeps working.
+func loadOTAStore(dir string) *OTAStore {
+	manifest := OTAManifest{Samples: make(map[string]OTASample)}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		logger.Warn("OTA samples directory unavailable, OTA disabled", "dir", dir, "error", err)
+		return &OTAStore{dir: dir, manifest: manifest}
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		files, err := collectSampleFiles(filepath.Join(dir, name))
+		if err != nil {
+			logger.Warn("failed to hash sample, skipping", "sample", name, "error", err)
+			continue
+		}
+		if len(files) == 0 {
+			continue
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+
+		h := sha256.New()
+		for _, f := range files {
+			io.WriteString(h, f.Path)
+			io.WriteString(h, f.SHA256)
+		}
+
+		manifest.Samples[name] = OTASample{
+			Hash:  hex.EncodeToString(h.Sum(nil)),
+			Files: files,
+		}
+	}
+
+	logger.Info("OTA manifest built", "dir", dir, "samples", len(manifest.Samples))
+	return &OTAStore{dir: dir, manifest: manifest}
+}
+
+func handleOTAManifest(store *OTAStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, store.manifest)
+	}
+}
+
+func handleOTAFile(store *OTAStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sample := r.URL.Query().Get("sample")
+		reqPath := r.URL.Query().Get("path")
+
+		sampleInfo, ok := store.manifest.Samples[sample]
+		if !ok {
+			http.Error(w, "unknown sample", http.StatusNotFound)
+			return
+		}
+
+		clean := filepath.ToSlash(filepath.Clean(reqPath))
+		if clean == "." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+
+		found := false
+		for _, f := range sampleInfo.Files {
+			if f.Path == clean {
+				found = true
+				break
+			}
+		}
+		if !found {
+			http.Error(w, "unknown file", http.StatusNotFound)
+			return
+		}
+
+		full := filepath.Join(store.dir, sample, filepath.FromSlash(clean))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, full)
+	}
+}
+
 // ---- Static handlers ----
 
 func handleAdminUI(w http.ResponseWriter, r *http.Request) {
@@ -391,6 +538,12 @@ func loggingMiddleware(next http.Handler) http.Handler {
 func main() {
 	state := NewServerState()
 
+	samplesDir := os.Getenv("SAMPLES_DIR")
+	if samplesDir == "" {
+		samplesDir = "/samples"
+	}
+	otaStore := loadOTAStore(samplesDir)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/state", handleState(state))
 	mux.HandleFunc("POST /api/checkin", handleCheckin(state))
@@ -401,6 +554,8 @@ func main() {
 	mux.HandleFunc("POST /api/admin/poll", handleAdminPollStart(state))
 	mux.HandleFunc("DELETE /api/admin/poll", handleAdminPollStop(state))
 	mux.HandleFunc("GET /api/admin/badges", handleAdminBadges(state))
+	mux.HandleFunc("GET /api/ota/manifest", handleOTAManifest(otaStore))
+	mux.HandleFunc("GET /api/ota/file", handleOTAFile(otaStore))
 	mux.HandleFunc("GET /healthz/liveness", handleLiveness)
 	mux.HandleFunc("GET /healthz/readiness", handleReadiness)
 	mux.HandleFunc("GET /", handleAdminUI)
