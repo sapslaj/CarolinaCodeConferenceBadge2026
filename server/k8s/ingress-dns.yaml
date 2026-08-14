@@ -1,0 +1,6 @@
+apiVersion: dns.sapslaj.xyz/v1
+kind: IngressDNS
+metadata:
+  name: badge-hub
+spec:
+  hostname: badge.sapslaj.cloud

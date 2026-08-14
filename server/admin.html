@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Badge Hub Admin</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;padding:20px;max-width:800px;margin:0 auto}
+h1{color:#00ffff;margin-bottom:20px}
+h2{color:#ffa030;margin:20px 0 10px}
+.card{background:#11112a;border:1px solid #223;border-radius:8px;padding:16px;margin-bottom:16px}
+label{display:block;margin:8px 0 4px;color:#808080}
+input,select,textarea{width:100%;padding:8px;border:1px solid #334;border-radius:4px;background:#1a1a2e;color:#e0e0e0;font-size:14px}
+button{padding:8px 20px;border:none;border-radius:4px;background:#0066cc;color:#fff;font-size:14px;cursor:pointer;margin-top:8px}
+button:hover{background:#0088dd}
+button.danger{background:#cc3333}
+button.danger:hover{background:#dd4444}
+#badges{list-style:none}
+#badges li{padding:6px 0;border-bottom:1px solid #222;display:flex;justify-content:space-between}
+.stat{display:inline-block;background:#1a1a3e;padding:4px 12px;border-radius:4px;margin-right:8px;font-size:13px}
+.mood-bar{display:flex;gap:4px;margin-top:8px;flex-wrap:wrap}
+.mood-pill{padding:4px 10px;border-radius:12px;font-size:12px}
+.tally{margin-top:8px}
+.tally-row{display:flex;align-items:center;gap:8px;margin:4px 0}
+.bar{height:20px;background:#0066cc;border-radius:4px;min-width:2px}
+</style>
+</head>
+<body>
+<h1>🐱 Badge Hub</h1>
+
+<div id="stats" class="card">
+  <span class="stat">Online: <b id="online">0</b></span>
+  <span class="stat" id="mood-display"></span>
+</div>
+
+<div class="card">
+  <h2>📢 Broadcast Message</h2>
+  <label>Text (shows on all badges)</label>
+  <input id="bc-text" placeholder="LUNCH TIME 🌮" maxlength="40">
+  <label>Color (hex, e.g. #ffff00)</label>
+  <input id="bc-color" placeholder="#ffff00" value="#ffff00">
+  <button onclick="sendBroadcast()">Send</button>
+  <button class="danger" onclick="clearBroadcast()">Clear</button>
+</div>
+
+<div class="card">
+  <h2>💡 Light Command</h2>
+  <label>Pattern</label>
+  <select id="light-pattern">
+    <option value="off">OFF</option>
+    <option value="solid">SOLID</option>
+    <option value="rainbow">RAINBOW</option>
+    <option value="chase">CHASE</option>
+    <option value="breathe">BREATHE</option>
+    <option value="strobe">STROBE</option>
+    <option value="wave">WAVE</option>
+    <option value="pulse">PULSE</option>
+  </select>
+  <label>Color (hex)</label>
+  <input id="light-color" placeholder="#00ff00" value="#00ff00">
+  <button onclick="sendLights()">Set</button>
+</div>
+
+<div class="card">
+  <h2>📊 Live Poll</h2>
+  <label>Question</label>
+  <input id="poll-q" placeholder="Best talk so far?">
+  <label>Options (comma-separated)</label>
+  <input id="poll-opts" placeholder="Talk A, Talk B, Talk C">
+  <button onclick="startPoll()">Start Poll</button>
+  <button class="danger" onclick="stopPoll()">Stop Poll</button>
+  <div id="poll-results"></div>
+</div>
+
+<div class="card">
+  <h2>🔗 Connected Badges</h2>
+  <ul id="badges"></ul>
+</div>
+
+<script>
+async function api(method, path, body) {
+  const opts = {method, headers: {'Content-Type': 'application/json'}};
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const s = await fetch('/api/state').then(r => r.json());
+    document.getElementById('online').textContent = s.online;
+
+    // mood pills
+    const md = document.getElementById('mood-display');
+    md.innerHTML = '';
+    const moods = {'happy':'#00ff00','excited':'#ff8800','tired':'#888888','hungry':'#ff4444','cool':'#00aaff'};
+    for (const [mood, count] of Object.entries(s.mood)) {
+      const pill = document.createElement('span');
+      pill.className = 'mood-pill';
+      pill.style.background = moods[mood] || '#666';
+      pill.textContent = mood + ': ' + count;
+      md.appendChild(pill);
+    }
+
+    // poll results
+    const pr = document.getElementById('poll-results');
+    pr.innerHTML = '';
+    if (s.poll.active) {
+      const total = Object.values(s.poll.tally).reduce((a,b)=>a+b, 0) || 1;
+      for (const opt of s.poll.options) {
+        const v = s.poll.tally[opt] || 0;
+        const pct = Math.round(v / total * 100);
+        const row = document.createElement('div');
+        row.className = 'tally-row';
+        row.innerHTML = '<span style="width:120px">'+opt+'</span><div class="bar" style="width:'+pct+'%"></div><span>'+v+' ('+pct+'%)</span>';
+        pr.appendChild(row);
+      }
+    }
+  } catch(e) {}
+}
+
+async function refreshBadges() {
+  try {
+    const badges = await fetch('/api/admin/badges').then(r => r.json());
+    const ul = document.getElementById('badges');
+    ul.innerHTML = '';
+    for (const b of badges) {
+      const li = document.createElement('li');
+      const ago = Math.round((Date.now() - new Date(b.last_seen).getTime()) / 1000);
+      li.innerHTML = '<span><b>'+b.name+'</b> <span style="color:#888">('+b.mood+')</span></span><span style="color:#666">'+ago+'s ago</span>';
+      ul.appendChild(li);
+    }
+  } catch(e) {}
+}
+
+async function sendBroadcast() {
+  await api('POST', '/api/admin/broadcast', {
+    text: document.getElementById('bc-text').value,
+    color: document.getElementById('bc-color').value,
+  });
+}
+
+async function clearBroadcast() {
+  await api('POST', '/api/admin/broadcast', {text: '', color: '#ffffff'});
+  document.getElementById('bc-text').value = '';
+}
+
+async function sendLights() {
+  await api('POST', '/api/admin/lights', {
+    pattern: document.getElementById('light-pattern').value,
+    color: document.getElementById('light-color').value,
+  });
+}
+
+async function startPoll() {
+  const opts = document.getElementById('poll-opts').value.split(',').map(s => s.trim()).filter(Boolean);
+  await api('POST', '/api/admin/poll', {
+    question: document.getElementById('poll-q').value,
+    options: opts,
+  });
+}
+
+async function stopPoll() {
+  await api('DELETE', '/api/admin/poll');
+}
+
+refresh(); refreshBadges();
+setInterval(refresh, 2000);
+setInterval(refreshBadges, 5000);
+</script>
+</body>
+</html>
