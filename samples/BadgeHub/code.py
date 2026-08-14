@@ -57,7 +57,7 @@ WIFI_PASSWORD = os.getenv("WIFI_PASSWORD", "your-wifi-password")
 
 SERVER_URL = "https://badge.sapslaj.cloud"
 
-MY_NAME = os.getenv("MY_NAME", "YOUR NAME")
+MY_NAME = os.getenv("FIRST_NAME", "YOUR") + " " + os.getenv("LAST_NAME", "NAME")
 # ==============================================================
 
 
