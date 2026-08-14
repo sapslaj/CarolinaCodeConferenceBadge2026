@@ -350,11 +350,11 @@ def check_ota_updates():
     failed = []
     try:
         for kind, name in pending:
-            print("BadgeHub: OTA updating", kind, name)
+            send_telemetry(f"BadgeHub: OTA updating {kind} {name}")
             try:
                 info = api_get("/api/ota/unit?kind=" + kind + "&name=" + name)
             except Exception as exc:
-                print("BadgeHub: OTA unit fetch failed:", kind, name, exc)
+                send_telemetry(f"BadgeHub: OTA unit fetch failed: {kind} {name} {exc}")
                 failed.append("%s/%s" % (kind, name))
                 continue
             if apply_unit_update(kind, info):
@@ -362,7 +362,7 @@ def check_ota_updates():
                 updated = True
                 applied.append("%s/%s" % (kind, name))
             else:
-                print("BadgeHub: OTA update incomplete, will retry:", kind, name)
+                send_telemetry(f"BadgeHub: OTA update incomplete, will retry: {kind} {name}")
                 failed.append("%s/%s" % (kind, name))
             info = None
             gc.collect()
