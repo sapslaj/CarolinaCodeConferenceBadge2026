@@ -51,6 +51,23 @@ cell to my left" is one index. The stamp bit flips its meaning every
 tick, which saves walking the grid to clear it: a creature that moves
 into a cell that has not been visited yet this tick is skipped rather
 than moving twice.
+
+Four more things keep the tick cheap, because at the top of a fish
+bloom it runs ~1800 times:
+
+  * The cell bitmap is 50x50 -- one pixel per cell -- and a Group with
+    `scale=2` blows it up to the 100x100 the frame wants. displayio
+    does the zoom in C, so drawing a creature is a single `bmp[idx]`
+    store rather than a 2x2 `fill_region` call.
+  * `cells` and the bitmap use the *same* flat index, so nothing has to
+    convert between an index and (x, y) to draw.
+  * The tick carries its own work list: every creature that survives
+    appends where it ended up, so the next tick starts from a list of
+    occupied cells instead of rescanning all 2500. Entries can go stale
+    (eaten fish), which the stamp check already catches.
+  * Fish outnumber sharks roughly 10:1 and only ever look for open
+    water, so their neighbour scan is unrolled and skips the "is that
+    prey?" test entirely.
 """
 
 # --- backlight off FIRST, before the slow adafruit imports ---------
@@ -73,8 +90,9 @@ import adafruit_st7735r
 from adafruit_display_text import label
 
 # `bitmaptools` is a built-in module on the ESP32-S3 CircuitPython
-# build. The pure-Python fallback keeps the sample running (slowly) on
-# a build without it rather than crashing on import.
+# build; it paints the backdrop once at startup. The pure-Python
+# fallback keeps the sample running on a build without it rather than
+# crashing on import -- the simulation itself never calls it.
 try:
     from bitmaptools import fill_region
 except ImportError:
@@ -104,10 +122,9 @@ OCEAN = 0                    # also the empty-cell marker
 FISH = 1
 SHARK = 2
 
-CELL = 2                     # badge pixels per world cell -> 100x100
+CELL = 2                     # display zoom: 50x50 cells -> 100x100 px
 CELL_COUNT = COLS * ROWS
 COLS_1 = COLS - 1
-ROWS_1 = ROWS - 1
 LAST_ROW = CELL_COUNT - COLS
 
 # Creature packing (see the module docstring).
@@ -115,6 +132,10 @@ FERT_SHIFT = 2
 CHI_SHIFT = 7
 STAMP_BIT = 1 << 15
 VALUE_MASK = STAMP_BIT - 1
+
+# Newborns, pre-packed: type + full energy, fertility zero.
+FISH_BABY = FISH | (START_FISH_CHI << CHI_SHIFT)
+SHARK_BABY = SHARK | (START_SHARK_CHI << CHI_SHIFT)
 
 # There is no Restart button, so the viewer restarts itself.
 EXTINCT_GRACE = 60           # ticks a lone species is allowed to coast
@@ -210,13 +231,17 @@ for i in range(BG_STEPS):
 fill_region(bg_bmp, FRAME_X0, FRAME_Y0, FRAME_X1, FRAME_Y1, BG_STEPS)
 scene.append(displayio.TileGrid(bg_bmp, pixel_shader=bg_pal))
 
+# One bitmap pixel per world cell, zoomed by the group. Keeping the
+# bitmap at world resolution means a cell is one store, and its flat
+# index is the same index the simulation already has in hand.
 grid_pal = displayio.Palette(3)
 grid_pal[OCEAN] = C_OCEAN
 grid_pal[FISH] = C_FISH
 grid_pal[SHARK] = C_SHARK
-grid_bmp = displayio.Bitmap(GRID_W, GRID_H, 3)
-scene.append(displayio.TileGrid(grid_bmp, pixel_shader=grid_pal,
-                                x=GRID_X, y=GRID_Y))
+grid_bmp = displayio.Bitmap(COLS, ROWS, 3)
+grid_group = displayio.Group(scale=CELL, x=GRID_X, y=GRID_Y)
+grid_group.append(displayio.TileGrid(grid_bmp, pixel_shader=grid_pal))
+scene.append(grid_group)
 
 title_lbl = label.Label(terminalio.FONT, text="WA-TOR", scale=2, color=C_TEXT)
 title_lbl.anchor_point = (0.5, 0.5)
@@ -246,6 +271,7 @@ display.root_group = scene
 # The world
 # ==================================================================
 cells = [0] * CELL_COUNT
+queue = []                   # where the creatures are, from last tick
 mv = [0, 0, 0, 0]            # scratch: open neighbours
 pv = [0, 0, 0, 0]            # scratch: neighbouring fish (sharks only)
 
@@ -254,39 +280,34 @@ fish_pop = 0
 shark_pop = 0
 
 
-def paint(idx, value):
-    """Draw one world cell, addressed by flat index."""
-    y = idx // COLS
-    x = idx - y * COLS
-    fill_region(grid_bmp, x * CELL, y * CELL,
-                x * CELL + CELL, y * CELL + CELL, value)
-
-
 def populate():
     """Fill an empty ocean with fish, then sharks, never stacking two."""
-    global fish_pop, shark_pop, stamp
+    global fish_pop, shark_pop, stamp, queue
 
     for i in range(CELL_COUNT):
         cells[i] = 0
-    fill_region(grid_bmp, 0, 0, GRID_W, GRID_H, OCEAN)
+    grid_bmp.fill(OCEAN)
 
     # New creatures carry stamp 0, so the first tick (stamp 1) moves them.
     stamp = 1
+    queue = []
 
     placed = 0
     while placed < STARTING_FISH:
         i = random.randrange(CELL_COUNT)
         if not cells[i]:
-            cells[i] = FISH | (START_FISH_CHI << CHI_SHIFT)
-            paint(i, FISH)
+            cells[i] = FISH_BABY
+            grid_bmp[i] = FISH
+            queue.append(i)
             placed += 1
 
     placed = 0
     while placed < STARTING_SHARKS:
         i = random.randrange(CELL_COUNT)
         if not cells[i]:
-            cells[i] = SHARK | (START_SHARK_CHI << CHI_SHIFT)
-            paint(i, SHARK)
+            cells[i] = SHARK_BABY
+            grid_bmp[i] = SHARK
+            queue.append(i)
             placed += 1
 
     fish_pop = STARTING_FISH
@@ -300,13 +321,12 @@ def step():
     if it can, breed if it is ready, otherwise wander. Cells are
     repainted as they change, so nothing redraws the whole grid.
     """
-    global stamp, fish_pop, shark_pop
+    global stamp, fish_pop, shark_pop, queue
 
-    # Local aliases: attribute and global lookups are the expensive
-    # part of a CircuitPython inner loop, and this one runs ~1000x
-    # per tick.
+    # Local aliases: in CircuitPython a global or attribute lookup
+    # costs noticeably more than a local, and this loop runs about
+    # 1800 times a tick at the top of a bloom.
     cells_ = cells
-    fill = fill_region
     bmp = grid_bmp
     rnd = random.randrange
     mv_ = mv
@@ -315,73 +335,91 @@ def step():
     fish = fish_pop
     sharks = shark_pop
 
-    queue = [i for i in range(CELL_COUNT) if cells_[i]]
+    pending = queue
+    nxt = []
+    keep = nxt.append        # every survivor records where it ended up
 
-    while queue:
-        idx = queue.pop()
+    while pending:
+        idx = pending.pop()
         c = cells_[idx]
         if not c or (c & STAMP_BIT) == mark:
-            # Empty (eaten, or its occupant moved away), or already
-            # took its turn after moving in here.
+            # Empty (its occupant moved away, or a shark ate it), or
+            # already took its turn after moving in here.
             continue
 
-        ctype = c & 3
-        fert = (c >> FERT_SHIFT) & 31
         chi = (c >> CHI_SHIFT) & 255
-
-        y = idx // COLS
-        x = idx - y * COLS
-        gx = x * CELL
-        gy = y * CELL
-
         if chi == 0:
             # Out of energy: it dies where it stands.
             cells_[idx] = 0
-            fill(bmp, gx, gy, gx + CELL, gy + CELL, OCEAN)
-            if ctype == FISH:
+            bmp[idx] = OCEAN
+            if c & 3 == FISH:
                 fish -= 1
             else:
                 sharks -= 1
             continue
 
-        # Four neighbours, wrapping -- the world is a torus.
-        up = idx - COLS if y else idx + LAST_ROW
-        dn = idx + COLS if y < ROWS_1 else x
+        ctype = c & 3
+        fert = (c >> FERT_SHIFT) & 31
+
+        # Four neighbours, wrapping -- the world is a torus. Only the
+        # column has to be worked out; the row edges are just the ends
+        # of the flat index.
+        x = idx % COLS
         lf = idx - 1 if x else idx + COLS_1
         rt = idx + 1 if x < COLS_1 else idx - COLS_1
+        up = idx - COLS if idx >= COLS else idx + LAST_ROW
+        dn = idx + COLS if idx < LAST_ROW else idx - LAST_ROW
 
         nopen = 0
         nprey = 0
-        for n in (lf, rt, dn, up):
-            t = cells_[n]
-            if not t:
-                mv_[nopen] = n
+        if ctype == SHARK:
+            # Sharks are the rare case (~1 in 10), so readability wins.
+            for n in (lf, rt, dn, up):
+                t = cells_[n]
+                if not t:
+                    mv_[nopen] = n
+                    nopen += 1
+                elif t & 3 == FISH:
+                    pv_[nprey] = n
+                    nprey += 1
+        else:
+            # Fish are the common case and only want open water; this
+            # is unrolled on purpose -- no loop, no tuple, no type test.
+            if not cells_[lf]:
+                mv_[nopen] = lf
                 nopen += 1
-            elif ctype == SHARK and (t & 3) == FISH:
-                pv_[nprey] = n
-                nprey += 1
+            if not cells_[rt]:
+                mv_[nopen] = rt
+                nopen += 1
+            if not cells_[dn]:
+                mv_[nopen] = dn
+                nopen += 1
+            if not cells_[up]:
+                mv_[nopen] = up
+                nopen += 1
 
         # A shark takes a fish if one is adjacent; otherwise anything
-        # alive moves into open water.
+        # alive moves into open water. One candidate needs no dice.
         if nprey:
-            n = pv_[rnd(nprey)]
+            n = pv_[0] if nprey == 1 else pv_[rnd(nprey)]
         elif nopen:
-            n = mv_[rnd(nopen)]
+            n = mv_[0] if nopen == 1 else mv_[rnd(nopen)]
         else:
             # Boxed in. The page pushes it back unchanged -- no move,
             # no energy spent, no fertility gained.
             cells_[idx] = (c & VALUE_MASK) | mark
+            keep(idx)
             continue
 
         # Breeding: the parent leaves a newborn in the cell it vacates.
         baby = 0
         if ctype == FISH:
             if fert >= FISH_FERT_RATE:
-                baby = FISH | (START_FISH_CHI << CHI_SHIFT) | mark
+                baby = FISH_BABY | mark
                 fert = 0
                 fish += 1
         elif fert >= SHARK_FERT_RATE:
-            baby = SHARK | (START_SHARK_CHI << CHI_SHIFT) | mark
+            baby = SHARK_BABY | mark
             fert = 0
             sharks += 1
 
@@ -394,16 +432,17 @@ def step():
 
         # Vacate: ocean, or the newborn. `baby & 3` is its palette index.
         cells_[idx] = baby
-        fill(bmp, gx, gy, gx + CELL, gy + CELL, baby & 3)
+        bmp[idx] = baby & 3
+        if baby:
+            keep(idx)
 
         fert += 1
         chi -= 1
         cells_[n] = ctype | (fert << FERT_SHIFT) | (chi << CHI_SHIFT) | mark
-        ny = n // COLS
-        nx = n - ny * COLS
-        fill(bmp, nx * CELL, ny * CELL,
-             nx * CELL + CELL, ny * CELL + CELL, ctype)
+        bmp[n] = ctype
+        keep(n)
 
+    queue = nxt
     stamp ^= 1
     fish_pop = fish
     shark_pop = sharks

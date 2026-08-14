@@ -58,15 +58,37 @@ breeds that turn.
   into a cell the tick has not reached yet would otherwise move twice.
   Marking it costs one bit, and flipping what "marked" means each tick
   saves a second pass over the grid to clear the marks.
-- **Torus arithmetic on flat indices** — `idx - COLS if y else idx +
-  LAST_ROW` and friends, so a fish leaving the top edge swims in at the
-  bottom with no coordinate wrapping in sight.
-- **Only changed cells are repainted**, two `bitmaptools.fill_region`
-  calls per creature that moves, and populations are tracked
+- **Torus arithmetic on flat indices** — `idx - COLS if idx >= COLS else
+  idx + LAST_ROW` and friends, so a fish leaving the top edge swims in
+  at the bottom with no coordinate wrapping in sight. Only the column
+  has to be worked out at all; the row edges are just the ends of the
+  index.
+- **The bitmap is 50×50, not 100×100.** One pixel per cell, blown up by
+  a `displayio.Group(scale=2)` — displayio does the zoom in C, so
+  drawing a creature is a single `bmp[idx]` store instead of a 2×2
+  `fill_region` call. The bitmap shares the simulation's flat index, so
+  nothing converts between an index and (x, y) to draw.
+- **The turn carries its own work list.** Every creature that survives
+  appends where it ended up, so the next turn starts from a list of
+  occupied cells instead of rescanning all 2500. Entries do go stale
+  when a shark eats a fish that had already moved — the stamp check was
+  catching that anyway.
+- **Fish get the unrolled path.** They outnumber sharks about 10:1 and
+  only ever look for open water, so their neighbour scan is four
+  straight-line tests with no loop, no tuple and no "is that prey?"
+  check. Sharks, being rare, keep the readable loop.
+- **Only changed cells are repainted**, and populations are tracked
   incrementally as creatures are born, eaten and starved rather than
   recounted each turn.
 
-At the top of a fish bloom the world holds ~1800 creatures, and a turn
-costs more than the page's 100 ms budget on this hardware — the loop
-holds 100 ms per turn when it has slack and free-runs when it does not,
-so a busy world just runs a little slower than a sparse one.
+Together those take a creature's turn to roughly half the Python-level
+work of the straightforward version. At the top of a fish bloom the
+world still holds ~1800 creatures and a turn costs more than the page's
+100 ms budget on this hardware — the loop holds 100 ms per turn when it
+has slack and free-runs when it does not, so a busy world just runs a
+little slower than a sparse one.
+
+Turn order is arbitrary in every version of this — the page pops its
+creature list, this pops its work list — and it does move the numbers:
+taking turns in strict grid order rather than work-list order settles
+the world about 9% denser. The rules are the same either way.
