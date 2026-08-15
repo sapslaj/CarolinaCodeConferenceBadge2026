@@ -13,6 +13,13 @@ WIFI_SSID = "your-wifi"
 WIFI_PASSWORD = "your-password"
 ```
 
+Optionally pin to a specific access point by BSSID (useful when multiple
+APs share the same SSID) by adding to `settings.toml`:
+
+```
+WIFI_BSSID = "8E:68:65:1B:15:7D"
+```
+
 Set the server URL in `code.py` (`SERVER_URL`) if you're not using the
 default. See `server/` in this repo for the badge-hub server itself.
 

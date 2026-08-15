@@ -1,6 +1,7 @@
 """
 BadgeHub -- conference badge connected to a server. Settings: WIFI_SSID /
-WIFI_PASSWORD in settings.toml, SERVER_URL / MY_NAME below. SW1 mood,
+WIFI_PASSWORD / WIFI_BSSID (optional) in settings.toml, SERVER_URL / MY_NAME
+below. SW1 mood,
 SW2 vote, SW3 hub/clock view. Also the OTA client for samples/lib/mods/
 tools -- see README.md, kept out of here on purpose: this whole file is
 exec()'d in one pass before WiFi even connects, so every docstring here
@@ -35,6 +36,7 @@ from adafruit_display_text import label
 
 WIFI_SSID = os.getenv("WIFI_SSID", "your-wifi-name")
 WIFI_PASSWORD = os.getenv("WIFI_PASSWORD", "your-wifi-password")
+WIFI_BSSID = os.getenv("WIFI_BSSID", "")  # optional
 
 SERVER_URL = "https://badge.sapslaj.cloud"
 
@@ -108,8 +110,13 @@ def http():
 
 
 def connect_wifi():
-    print("Connecting to WiFi:", WIFI_SSID)
-    wifi.radio.connect(WIFI_SSID, WIFI_PASSWORD)
+    bssid = None
+    if WIFI_BSSID:
+        bssid = bytes(int(b, 16) for b in WIFI_BSSID.split(":"))
+        print("Connecting to WiFi:", WIFI_SSID, "BSSID:", WIFI_BSSID)
+    else:
+        print("Connecting to WiFi:", WIFI_SSID)
+    wifi.radio.connect(WIFI_SSID, WIFI_PASSWORD, bssid=bssid)
     print("  IP =", wifi.radio.ipv4_address)
 
 
