@@ -37,12 +37,6 @@ jobs:
         working-directory: server/k8s
         run: kustomize edit set image "oci.sapslaj.xyz/badge-hub=oci.sapslaj.xyz/badge-hub:${{ steps.vars.outputs.tag }}"
 
-      - name: Set up kubeconfig
-        run: |
-          mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBECONFIG }}" > "$HOME/.kube/config"
-          chmod 600 "$HOME/.kube/config"
-
       - name: Apply
         run: kubectl apply -k server/k8s
 
