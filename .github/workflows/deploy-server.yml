@@ -23,7 +23,7 @@ jobs:
 
       - name: Point kustomization at the new image
         working-directory: server/k8s
-        run: kustomize edit set image "oci.sapslaj.xyz/badge-hub=oci.sapslaj.xyz/badge-hub:${{ steps.vars.outputs.tag }}"
+        run: kustomize edit set image "oci.sapslaj.xyz/badge-hub=oci.sapslaj.xyz/badge-hub:$(git rev-parse --short HEAD)"
 
       - name: Apply
         run: kubectl apply -k server/k8s
