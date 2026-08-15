@@ -43,6 +43,7 @@ ZIP_CODE = "29605"  # 5-digit US ZIP
 # ==============================================================
 
 
+import gc
 import time
 import board
 import busio
@@ -335,11 +336,11 @@ def api_error_screen(kind, e):
                 "ZIP: %s" % ZIP_CODE,
                 "",
                 "Could not look",
-                "up that ZIP",
-                "code.",
+                "up that ZIP:",
+                str(e)[:18],
                 "",
                 "Check ZIP_CODE",
-                "in code.py --",
+                "or network --",
                 "must be 5 digits",
             ],
         )
@@ -498,6 +499,12 @@ def render(weather, city, state):
 # error screen so attendees know exactly what to fix.
 # ------------------------------------------------------------------
 def try_refresh():
+    # Reclaim heap before the TLS handshake -- mbedTLS needs a
+    # contiguous chunk for its handshake buffers, and after building
+    # both displayio scenes the free list is fragmented enough that
+    # the handshake fails with -0x7280 on some builds.
+    gc.collect()
+
     # Step 1: WiFi
     if not wifi.radio.connected:
         try:
@@ -518,6 +525,7 @@ def try_refresh():
         return False
 
     # Step 3: Weather fetch + render
+    gc.collect()
     try:
         weather = fetch_weather(lat, lon)
         render(weather, city, state)
