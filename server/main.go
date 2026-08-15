@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
@@ -697,6 +698,34 @@ func handleReadiness(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"status": "ok"})
 }
 
+// ---- Admin auth middleware ----
+
+// adminAuthAllows compares Basic Auth credentials against the configured
+// admin username/password using constant-time comparison, so response
+// timing can't leak how many characters matched.
+func adminAuthAllows(username, password, wantUser, wantPass string) bool {
+	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(wantUser)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(wantPass)) == 1
+	return userOK && passOK
+}
+
+// adminAuthMiddleware wraps only the admin UI and /api/admin/* routes --
+// badge-facing routes (checkin, mood, vote, ota, telemetry) stay open, since
+// badges have no way to prompt a wearer for a password.
+func adminAuthMiddleware(username, password string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user, pass, ok := r.BasicAuth()
+			if !ok || !adminAuthAllows(user, pass, username, password) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="Badge Hub Admin"`)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // ---- Logging middleware ----
 
 type responseRecorder struct {
@@ -736,24 +765,32 @@ func main() {
 		"tools":   envOr("TOOLS_DIR", "/tools"),
 	})
 
+	adminUser := os.Getenv("ADMIN_USERNAME")
+	adminPass := os.Getenv("ADMIN_PASSWORD")
+	if adminUser == "" || adminPass == "" {
+		logger.Error("ADMIN_USERNAME and ADMIN_PASSWORD must both be set to run the admin interface")
+		os.Exit(1)
+	}
+	requireAdmin := adminAuthMiddleware(adminUser, adminPass)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/state", handleState(state))
 	mux.HandleFunc("POST /api/checkin", handleCheckin(state))
 	mux.HandleFunc("POST /api/mood", handleMood(state))
 	mux.HandleFunc("POST /api/vote", handleVote(state))
-	mux.HandleFunc("POST /api/admin/broadcast", handleAdminBroadcast(state))
-	mux.HandleFunc("POST /api/admin/lights", handleAdminLights(state))
-	mux.HandleFunc("POST /api/admin/poll", handleAdminPollStart(state))
-	mux.HandleFunc("DELETE /api/admin/poll", handleAdminPollStop(state))
-	mux.HandleFunc("GET /api/admin/badges", handleAdminBadges(state))
+	mux.Handle("POST /api/admin/broadcast", requireAdmin(handleAdminBroadcast(state)))
+	mux.Handle("POST /api/admin/lights", requireAdmin(handleAdminLights(state)))
+	mux.Handle("POST /api/admin/poll", requireAdmin(handleAdminPollStart(state)))
+	mux.Handle("DELETE /api/admin/poll", requireAdmin(handleAdminPollStop(state)))
+	mux.Handle("GET /api/admin/badges", requireAdmin(handleAdminBadges(state)))
 	mux.HandleFunc("POST /api/telemetry", handleTelemetry(state))
-	mux.HandleFunc("GET /api/admin/telemetry", handleAdminTelemetry(state))
+	mux.Handle("GET /api/admin/telemetry", requireAdmin(handleAdminTelemetry(state)))
 	mux.HandleFunc("GET /api/ota/manifest", handleOTAManifest(otaStore))
 	mux.HandleFunc("GET /api/ota/unit", handleOTAUnit(otaStore))
 	mux.HandleFunc("GET /api/ota/file", handleOTAFile(otaStore))
 	mux.HandleFunc("GET /healthz/liveness", handleLiveness)
 	mux.HandleFunc("GET /healthz/readiness", handleReadiness)
-	mux.HandleFunc("GET /", handleAdminUI)
+	mux.Handle("GET /", requireAdmin(http.HandlerFunc(handleAdminUI)))
 
 	handler := loggingMiddleware(mux)
 

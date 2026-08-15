@@ -36,3 +36,13 @@ spec:
           env:
             - name: LISTEN_ADDR
               value: ":8080"
+            - name: ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: badge-hub-admin
+                  key: username
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: badge-hub-admin
+                  key: password
