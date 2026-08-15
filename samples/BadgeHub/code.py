@@ -651,7 +651,7 @@ while True:
             poll_opts_lbl.text = ""
             hint_lbl.text = "S3: back to hub"
         else:
-            title_lbl.text = "BADGEHUB"
+            title_lbl.text = "BADGE HUB"
             hint_lbl.text = "S1:mood S2:vote S3:view"
             update_display(current_state)
         display.refresh()
